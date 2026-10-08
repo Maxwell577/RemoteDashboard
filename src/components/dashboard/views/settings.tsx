@@ -17,6 +17,7 @@ import {
 import { api, type AppSettings } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { ErrorBlock, LoadingBlock, Panel, SectionHeader } from '../shared'
+import SavedCommands from './saved-commands'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -406,7 +407,12 @@ export default function SettingsView() {
           </p>
         </SectionCard>
 
-        {/* 5. About — wide */}
+        {/* 5. Saved commands — wide */}
+        <div className="lg:col-span-2">
+          <SavedCommands />
+        </div>
+
+        {/* 6. About — wide */}
         <Panel className="glass-hover p-6 lg:col-span-2">
           <div className="flex items-start gap-3">
             <div className="glass-inset flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-primary">

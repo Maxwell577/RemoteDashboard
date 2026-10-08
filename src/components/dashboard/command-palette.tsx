@@ -1,0 +1,256 @@
+'use client'
+
+import { useEffect } from 'react'
+import { useTheme } from 'next-themes'
+import { useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import {
+  Bell,
+  Camera,
+  Cpu,
+  FolderTree,
+  LayoutDashboard,
+  LocateFixed,
+  MonitorSmartphone,
+  Moon,
+  RadioTower,
+  ScrollText,
+  Settings,
+  SquareTerminal,
+  Sun,
+  Clapperboard,
+  MapPin,
+  RefreshCw,
+  Terminal,
+  CheckCheck,
+} from 'lucide-react'
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandSeparator,
+} from '@/components/ui/command'
+import { api, type Alert, type Device } from '@/lib/types'
+import { useDash, type ViewId } from '@/lib/store'
+import { useDevices } from './shared'
+
+const NAV_ITEMS: { view: ViewId; label: string; icon: typeof LayoutDashboard }[] = [
+  { view: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { view: 'devices', label: 'Devices', icon: MonitorSmartphone },
+  { view: 'terminal', label: 'Terminal', icon: SquareTerminal },
+  { view: 'files', label: 'File explorer', icon: FolderTree },
+  { view: 'processes', label: 'Process manager', icon: Cpu },
+  { view: 'media', label: 'Media capture', icon: Clapperboard },
+  { view: 'network', label: 'Network capture', icon: RadioTower },
+  { view: 'location', label: 'Location', icon: MapPin },
+  { view: 'alerts', label: 'Alerts', icon: Bell },
+  { view: 'audit', label: 'Audit log', icon: ScrollText },
+  { view: 'settings', label: 'Settings', icon: Settings },
+]
+
+/**
+ * Global ⌘K palette: navigate views, jump to a device, run quick actions.
+ * Open state lives in the store so the topbar button can trigger it too.
+ */
+export default function CommandPalette() {
+  const open = useDash((s) => s.paletteOpen)
+  const setOpen = useDash((s) => s.setPaletteOpen)
+  const setView = useDash((s) => s.setView)
+  const selectedDeviceId = useDash((s) => s.selectedDeviceId)
+  const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
+  const { data: devices } = useDevices()
+  const qc = useQueryClient()
+  const { resolvedTheme, setTheme } = useTheme()
+
+  // global hotkey
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'k' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        setOpen(!useDash.getState().paletteOpen)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [setOpen])
+
+  const run = (fn: () => void | Promise<void>) => {
+    setOpen(false)
+    void fn()
+  }
+
+  const goDevice = (d: Device) =>
+    run(() => {
+      setSelectedDeviceId(d.id)
+      setView('terminal')
+    })
+
+  const screenshot = async () => {
+    if (!selectedDeviceId) {
+      toast.warning('Select a device first')
+      setView('devices')
+      return
+    }
+    try {
+      const asset = await api<{ id: string }>('/api/media/screenshot', {
+        method: 'POST',
+        body: JSON.stringify({ deviceId: selectedDeviceId }),
+      })
+      toast.success('Screenshot captured — see Media view')
+      qc.invalidateQueries({ queryKey: ['media'] })
+      qc.setQueryData(['last-screenshot'], asset.id)
+      setView('media')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Screenshot failed')
+    }
+  }
+
+  const ackAll = async () => {
+    try {
+      const alerts = await api<Alert[]>('/api/alerts?limit=100&unackOnly=1')
+      for (const a of alerts) {
+        await api(`/api/alerts/${a.id}/ack`, { method: 'POST' }).catch(() => undefined)
+      }
+      toast.success(`Acknowledged ${alerts.length} alert${alerts.length === 1 ? '' : 's'}`)
+      qc.invalidateQueries({ queryKey: ['alerts'] })
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to ack alerts')
+    }
+  }
+
+  const freshFix = async () => {
+    if (!selectedDeviceId) {
+      toast.warning('Select a device first')
+      setView('devices')
+      return
+    }
+    try {
+      await api('/api/location/ping', {
+        method: 'POST',
+        body: JSON.stringify({ deviceId: selectedDeviceId }),
+      })
+      toast.success('Fresh location fix received')
+      qc.invalidateQueries({ queryKey: ['location'] })
+      setView('location')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Location fix failed')
+    }
+  }
+
+  return (
+    <CommandDialog
+      open={open}
+      onOpenChange={setOpen}
+      title="Command palette"
+      description="Navigate, jump to devices and run quick actions"
+      className="glass-strong animate-in fade-in zoom-in-95 duration-200 [&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-widest [&_[cmdk-input]]:text-sm"
+    >
+      <CommandInput placeholder="Type a command or search devices…" />
+      <CommandList className="scroll-slim">
+        <CommandEmpty>No results found.</CommandEmpty>
+
+        <CommandGroup heading="Navigate">
+          {NAV_ITEMS.map((item) => {
+            const Icon = item.icon
+            return (
+              <CommandItem
+                key={item.view}
+                value={`go ${item.label}`}
+                onSelect={() => run(() => setView(item.view))}
+                className="gap-2.5 rounded-lg aria-selected:bg-primary/15 aria-selected:text-primary"
+              >
+                <Icon className="size-4" aria-hidden />
+                <span>{item.label}</span>
+                <span className="ml-auto text-[10px] uppercase tracking-wider text-muted-foreground/60">
+                  view
+                </span>
+              </CommandItem>
+            )
+          })}
+        </CommandGroup>
+
+        <CommandSeparator />
+
+        <CommandGroup heading="Jump to device (opens terminal)">
+          {(devices ?? []).map((d) => (
+            <CommandItem
+              key={d.id}
+              value={`device ${d.hostname} ${d.friendlyName ?? ''} ${d.osName}`}
+              onSelect={() => goDevice(d)}
+              className="gap-2.5 rounded-lg aria-selected:bg-primary/15 aria-selected:text-primary"
+            >
+              <Terminal className="size-4" aria-hidden />
+              <span className="font-medium">{d.hostname}</span>
+              <span className="text-xs text-muted-foreground">{d.osName}</span>
+              <span
+                className={`ml-auto inline-block size-2 rounded-full ${
+                  d.status === 'online' ? 'bg-emerald-500' : 'bg-zinc-400'
+                }`}
+                aria-hidden
+              />
+            </CommandItem>
+          ))}
+        </CommandGroup>
+
+        <CommandSeparator />
+
+        <CommandGroup heading="Actions">
+          <CommandItem
+            value="screenshot capture now"
+            onSelect={() => run(screenshot)}
+            className="gap-2.5 rounded-lg aria-selected:bg-primary/15 aria-selected:text-primary"
+          >
+            <Camera className="size-4" aria-hidden />
+            <span>Take screenshot{selectedDeviceId ? ' (selected device)' : ''}</span>
+          </CommandItem>
+          <CommandItem
+            value="location fix refresh gps"
+            onSelect={() => run(freshFix)}
+            className="gap-2.5 rounded-lg aria-selected:bg-primary/15 aria-selected:text-primary"
+          >
+            <LocateFixed className="size-4" aria-hidden />
+            <span>Request fresh location fix</span>
+          </CommandItem>
+          <CommandItem
+            value="ack acknowledge all alerts"
+            onSelect={() => run(ackAll)}
+            className="gap-2.5 rounded-lg aria-selected:bg-primary/15 aria-selected:text-primary"
+          >
+            <CheckCheck className="size-4" aria-hidden />
+            <span>Acknowledge all alerts</span>
+          </CommandItem>
+          <CommandItem
+            value="refresh data invalidate cache"
+            onSelect={() =>
+              run(() => {
+                qc.invalidateQueries()
+                toast.success('All data refreshed')
+              })
+            }
+            className="gap-2.5 rounded-lg aria-selected:bg-primary/15 aria-selected:text-primary"
+          >
+            <RefreshCw className="size-4" aria-hidden />
+            <span>Refresh all data</span>
+          </CommandItem>
+          <CommandItem
+            value="theme dark light toggle mode"
+            onSelect={() =>
+              run(() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark'))
+            }
+            className="gap-2.5 rounded-lg aria-selected:bg-primary/15 aria-selected:text-primary"
+          >
+            {resolvedTheme === 'dark' ? (
+              <Sun className="size-4" aria-hidden />
+            ) : (
+              <Moon className="size-4" aria-hidden />
+            )}
+            <span>Toggle light / dark theme</span>
+          </CommandItem>
+        </CommandGroup>
+      </CommandList>
+    </CommandDialog>
+  )
+}

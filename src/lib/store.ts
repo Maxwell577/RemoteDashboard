@@ -33,6 +33,9 @@ interface DashState {
   unreadAlerts: number
   bumpUnreadAlerts: () => void
   clearUnreadAlerts: () => void
+  /** global command palette (⌘K) */
+  paletteOpen: boolean
+  setPaletteOpen: (v: boolean) => void
 }
 
 export const useDash = create<DashState>((set) => ({
@@ -48,4 +51,6 @@ export const useDash = create<DashState>((set) => ({
   unreadAlerts: 0,
   bumpUnreadAlerts: () => set((s) => ({ unreadAlerts: s.unreadAlerts + 1 })),
   clearUnreadAlerts: () => set({ unreadAlerts: 0 }),
+  paletteOpen: false,
+  setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
 }))

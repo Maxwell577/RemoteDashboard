@@ -310,6 +310,24 @@ function getVolume(ctx: ExecContext): string {
   return rows.join("\n");
 }
 
+function getPsDrive(ctx: ExecContext): string {
+  const rows = [
+    "",
+    `${w("Name", 6)}${w("Used (GB)", 11)}${w("Free (GB)", 11)}${w("Provider", 10)}${w("Root", 8)}${"CurrentLocation"}`,
+  ];
+  for (const v of ctx.def.volumes) {
+    const used = v.sizeGb * (ctx.def.diskPercent / 100);
+    const free = v.sizeGb - used;
+    rows.push(
+      `${w(v.letter.replace(":\\", ":"), 6)}${w(used.toFixed(2), 11)}${w(free.toFixed(2), 11)}${w("FileSystem", 10)}${w(v.letter, 8)}`,
+    );
+  }
+  // PowerShell always lists the temp/variable drives too
+  rows.push(`${w("Temp", 6)}${w("0.01", 11)}${w("0.49", 11)}${w("FileSystem", 10)}${w("Temp:\\", 8)}`);
+  rows.push(`${w("A", 6)}${w("0.00", 11)}${w("0.01", 11)}${w("Variable", 10)}${w("A:\\", 8)}`);
+  return rows.join("\n");
+}
+
 function whoamiPriv(ctx: ExecContext): string {
   const rows: string[][] = ctx.def.profile === "server"
     ? [
@@ -405,6 +423,8 @@ export async function runCommand(command: string, ctx: ExecContext): Promise<Exe
     output = getNetIpAddress(ctx);
   } else if (lower === "get-volume") {
     output = getVolume(ctx);
+  } else if (lower.startsWith("get-psdrive") || lower.startsWith("gpsdrive")) {
+    output = getPsDrive(ctx);
   } else if (lower === "qwinsta" || lower === "query session") {
     output = qwinsta(ctx);
   } else {

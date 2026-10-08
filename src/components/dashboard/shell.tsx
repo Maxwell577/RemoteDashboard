@@ -15,6 +15,7 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
   SquareTerminal,
+  Search,
   type LucideIcon,
 } from 'lucide-react'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
@@ -25,6 +26,8 @@ import { cn } from '@/lib/utils'
 import { StatusDot, useDevices } from './shared'
 import Realtime from './realtime'
 import ThemeToggle from './theme-toggle'
+import CommandPalette from './command-palette'
+import { Kbd, ModKey } from './kbd'
 import Overview from './views/overview'
 import Devices from './views/devices'
 import Terminal from './views/terminal'
@@ -187,6 +190,7 @@ export default function DashboardShell() {
   const setView = useDash((s) => s.setView)
   const hubOnline = useDash((s) => s.hubOnline)
   const unread = useDash((s) => s.unreadAlerts)
+  const setPaletteOpen = useDash((s) => s.setPaletteOpen)
   const [navOpen, setNavOpen] = useState(false)
   const { data: devices } = useDevices()
 
@@ -203,6 +207,7 @@ export default function DashboardShell() {
     <div className="flex min-h-screen flex-col">
       <div className="mesh-bg" aria-hidden />
       <Realtime />
+      <CommandPalette />
 
       {/* Topbar */}
       <header className="glass-strong sticky top-0 z-40 h-14 w-full">
@@ -219,6 +224,32 @@ export default function DashboardShell() {
           <h1 className="truncate text-sm font-semibold tracking-tight sm:text-base">
             {VIEWS[view].label}
           </h1>
+
+          {/* Command palette trigger */}
+          <button
+            type="button"
+            aria-label="Open command palette"
+            onClick={() => setPaletteOpen(true)}
+            className="glass-inset ml-3 hidden h-9 min-w-0 items-center gap-2 rounded-full px-3.5 text-xs text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground md:flex md:w-56 lg:w-64"
+          >
+            <Search className="size-3.5 shrink-0" aria-hidden />
+            <span className="truncate">Search views & devices…</span>
+            <span className="ml-auto flex shrink-0 items-center gap-0.5">
+              <Kbd>
+                <ModKey />
+              </Kbd>
+              <Kbd>K</Kbd>
+            </span>
+          </button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-11 md:hidden"
+            aria-label="Open command palette"
+            onClick={() => setPaletteOpen(true)}
+          >
+            <Search className="size-[18px]" aria-hidden />
+          </Button>
 
           <div className="ml-auto flex items-center gap-2">
             <div className="glass-inset hidden items-center gap-2 rounded-full px-3 py-1.5 sm:flex">

@@ -157,6 +157,18 @@ export default function Terminal() {
     inputRef.current?.focus()
   }
 
+  // persisted execution history for this device (server-side)
+  const cmdHistory = useQuery({
+    queryKey: ['commands', selectedDeviceId],
+    queryFn: () =>
+      api<CommandExecution[]>(
+        `/api/commands?deviceId=${encodeURIComponent(selectedDeviceId ?? '')}&limit=12`
+      ),
+    enabled: Boolean(selectedDeviceId),
+    refetchInterval: 20000,
+  })
+  const [showHistory, setShowHistory] = useState(false)
+
   return (
     <div className="flex flex-col gap-4">
       <SectionHeader
@@ -176,6 +188,20 @@ export default function Terminal() {
             <Button
               variant="ghost"
               size="sm"
+              className={cn(
+                'glass-inset h-11 gap-2',
+                showHistory && 'border-primary/30 bg-primary/10 text-primary'
+              )}
+              disabled={!selectedDeviceId}
+              aria-expanded={showHistory}
+              onClick={() => setShowHistory((v) => !v)}
+            >
+              <History className="h-4 w-4" />
+              History
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               className="glass-inset h-11 gap-2"
               disabled={entries.length === 0}
               onClick={() => {
@@ -189,6 +215,54 @@ export default function Terminal() {
           </>
         }
       />
+
+      {showHistory ? (
+        <Panel className="p-3">
+          <div className="mb-2 flex items-center justify-between px-1">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Recent executions on this device
+            </p>
+            <span className="text-[11px] text-muted-foreground">
+              click a row to load it into the prompt
+            </span>
+          </div>
+          {cmdHistory.isPending ? (
+            <p className="px-1 py-3 text-xs text-muted-foreground">Loading history…</p>
+          ) : (cmdHistory.data?.length ?? 0) === 0 ? (
+            <p className="px-1 py-3 text-xs text-muted-foreground">
+              No persisted executions yet.
+            </p>
+          ) : (
+            <div className="scroll-slim max-h-52 divide-y overflow-y-auto rounded-xl">
+              {(cmdHistory.data ?? []).map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => insertCommand(c.command)}
+                  className="glass-inset flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-accent/50"
+                >
+                  <span
+                    className={cn(
+                      'inline-block size-2 shrink-0 rounded-full',
+                      c.status === 'completed' && 'bg-emerald-500',
+                      c.status === 'failed' && 'bg-rose-500',
+                      c.status === 'timeout' && 'bg-amber-500',
+                      (c.status === 'pending' || c.status === 'running') && 'animate-pulse bg-teal-500'
+                    )}
+                    aria-hidden
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs" title={c.command}>
+                    {c.command}
+                  </span>
+                  <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                    exit {c.exitCode ?? '—'} · {c.durationMs ?? '—'}ms · {timeAgo(c.createdAt)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </Panel>
+      ) : null}
 
       <div className="flex flex-col gap-4 lg:flex-row">
         {/* left column — device + quick/saved commands (always visible) */}

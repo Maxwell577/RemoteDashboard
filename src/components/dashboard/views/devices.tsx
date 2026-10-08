@@ -476,6 +476,66 @@ export default function Devices() {
               {offlineCount} offline
             </Badge>
             <Badge variant="secondary">{deviceList.length} total</Badge>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="glass-inset h-11 gap-2 md:h-9"
+              disabled={deviceList.length === 0}
+              onClick={() => {
+                const headers = [
+                  'hostname',
+                  'friendlyName',
+                  'osName',
+                  'osVersion',
+                  'osArch',
+                  'deviceType',
+                  'status',
+                  'cpuModel',
+                  'cpuCores',
+                  'totalMemoryMB',
+                  'localIp',
+                  'ipAddress',
+                  'macAddress',
+                  'agentVersion',
+                  'lastSeen',
+                  'locationLabel',
+                ]
+                const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+                const rows = deviceList.map((d) =>
+                  [
+                    d.hostname,
+                    d.friendlyName,
+                    d.osName,
+                    d.osVersion,
+                    d.osArch,
+                    d.deviceType,
+                    d.status,
+                    d.cpuModel,
+                    d.cpuCores,
+                    d.totalMemoryMB,
+                    d.localIp,
+                    d.ipAddress,
+                    d.macAddress,
+                    d.agentVersion,
+                    d.lastSeen,
+                    d.locationLabel,
+                  ]
+                    .map(esc)
+                    .join(',')
+                )
+                const csv = [headers.map(esc).join(','), ...rows].join('\n')
+                const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+                const a = document.createElement('a')
+                a.href = url
+                a.download = 'sentrarmm-device-inventory.csv'
+                a.click()
+                URL.revokeObjectURL(url)
+                toast.success(`Exported ${deviceList.length} devices to CSV`)
+              }}
+            >
+              <Download className="h-4 w-4" />
+              Export CSV
+            </Button>
           </>
         }
       />

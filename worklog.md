@@ -176,3 +176,25 @@ Work Log:
 Stage Summary:
 - Project complete at v0.1.0: 11 views, 39 API route files, socket hub + 3 simulated agents, glass design system, light/dark, mobile responsive
 - Next-phase candidates: real Windows agent binary (same socket protocol), Supabase artifact sync, Cloudflare Pages deployment, auth (NextAuth), saved-commands UI in Settings, WebSocket stream viewer
+
+---
+Task ID: 6
+Agent: orchestrator (cron review round 1)
+Task: QA pass + new features (command palette, saved-commands manager, terminal history, CSV export) + styling polish
+
+Work Log:
+- QA: services healthy (hub :3003, Next :3000, tested via gateway :81); zero fresh console/page errors after clearing stale logs; all views rendering
+- FEATURE Command Palette (⌘K / Ctrl+K): new src/components/dashboard/command-palette.tsx using cmdk via existing ui/command; groups = Navigate (11 views) / Jump to device (searchable, jumps to terminal with device selected) / Actions (screenshot, fresh location fix, ack-all alerts, refresh all data, toggle theme); glass-strong styling with uppercase tracking group headings; store gained paletteOpen/setPaletteOpen (src/lib/store.ts); topbar gained a glass-inset search pill (desktop) + icon button (mobile) with new Kbd/ModKey atoms (src/components/dashboard/kbd.tsx)
+- FEATURE Saved Commands manager: new src/components/dashboard/views/saved-commands.tsx mounted full-width in Settings; create dialog (name/command/description/category), delete, copy-to-clipboard, category + timeAgo badges; verified end-to-end: created "Disk usage" → chip appeared in Terminal → executed successfully
+- FEATURE Terminal history panel: History toggle button in header → persisted executions for selected device (GET /api/commands?deviceId=&limit=12, 20s poll), status dots (completed/failed/timeout/pending), click row → loads command into prompt
+- FEATURE Devices CSV export: Export CSV button builds escaped CSV (16 columns) client-side → Blob download "sentrarmm-device-inventory.csv"; verified toast "Exported 3 devices to CSV"
+- STYLE: StatCard now has per-stat tinted icon chips (emerald/teal/amber/rose/zinc) + corner sheen blob that brightens on hover; palette/dialogs animate-in zoom/fade
+- SIMULATOR: added Get-PSDrive/gpsdrive (prefix match) to agent-hub exec sim (mini-services/agent-hub/sim/exec.ts) — realistic drive table w/ Temp + Variable drives
+- BUG FIX (infra): TWO `bun run index.ts` hub processes were simultaneously bound to :3003 via SO_REUSEPORT → dispatches round-robined between old/new code (looked like my edit "not working"); fixed by killing both + running a single instance. NOTE for future: when restarting the hub, verify process count with `ps aux | grep "bun run index.ts" | grep -v grep`
+- Verified: socket auto-reconnects after hub restart (Hub pill flips back online within ~15s); hub restart correctly generated 3 "Device went offline" warning alerts (pipeline working); palette ack-all cleared them (0 unacked left)
+- bun run lint: clean; bunx tsc --noEmit (src): clean; dev.log: no runtime errors
+
+Stage Summary:
+- Version now v0.1.1 feature set: 11 views + command palette + saved commands CRUD + terminal history + inventory export
+- Files: +3 new (command-palette.tsx, kbd.tsx, saved-commands.tsx), edited: store.ts, shell.tsx, overview.tsx, terminal.tsx, devices.tsx, settings.tsx, agent-hub/sim/exec.ts
+- Next-phase candidates: real Windows agent binary (socket protocol in types.ts), Supabase artifact sync, Cloudflare Pages deploy config, NextAuth login, WebSocket live-stream viewer, per-device uptime sparkline history table

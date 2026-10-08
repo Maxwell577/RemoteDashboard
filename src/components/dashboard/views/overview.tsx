@@ -67,17 +67,36 @@ function StatCard({
   label,
   value,
   subtitle,
+  tint = 'emerald',
 }: {
   icon: ReactNode
   label: string
   value: ReactNode
   subtitle?: ReactNode
+  tint?: 'emerald' | 'teal' | 'amber' | 'rose' | 'zinc'
 }) {
+  const tints = {
+    emerald: 'text-emerald-600 dark:text-emerald-400 shadow-emerald-500/20',
+    teal: 'text-teal-600 dark:text-teal-400 shadow-teal-500/20',
+    amber: 'text-amber-600 dark:text-amber-400 shadow-amber-500/20',
+    rose: 'text-rose-600 dark:text-rose-400 shadow-rose-500/20',
+    zinc: 'text-zinc-500 dark:text-zinc-400',
+  } as const
   return (
-    <Panel className="glass-hover p-4">
+    <Panel className="glass-hover group relative overflow-hidden p-4">
+      {/* corner sheen for the liquid-glass look */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full bg-primary/5 blur-2xl transition-opacity duration-300 group-hover:bg-primary/10"
+      />
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium text-muted-foreground">{label}</span>
-        <span className="glass-inset flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-primary [&_svg]:size-3.5">
+        <span
+          className={cn(
+            'glass-inset flex h-7 w-7 shrink-0 items-center justify-center rounded-lg shadow-sm [&_svg]:size-3.5',
+            tints[tint]
+          )}
+        >
           {icon}
         </span>
       </div>
@@ -170,35 +189,41 @@ export default function Overview() {
           label="Total devices"
           value={stats?.totalDevices ?? deviceList.length}
           subtitle={<>{onlineCount} online</>}
+          tint="emerald"
         />
         <StatCard
           icon={<span className="status-dot status-dot--static bg-emerald-500" />}
           label="Online now"
           value={onlineCount}
           subtitle="agents reporting in"
+          tint="teal"
         />
         <StatCard
           icon={<SquareTerminal />}
           label="Commands today"
           value={stats?.commandsToday ?? '—'}
           subtitle="executions since midnight"
+          tint="zinc"
         />
         <StatCard
           icon={<Clapperboard />}
           label="Active media"
           value={stats?.activeCaptures ?? '—'}
           subtitle="media captures running"
+          tint="teal"
         />
         <StatCard
           icon={<RadioTower />}
           label="Net captures"
           value={stats?.runningNetCaptures ?? '—'}
           subtitle="packet captures live"
+          tint="amber"
         />
         <StatCard
           icon={<Bell />}
           label="Unack alerts"
           value={stats?.unackAlerts ?? '—'}
+          tint={stats && stats.unackAlerts > 0 ? 'amber' : 'zinc'}
           subtitle={
             stats && stats.criticalAlerts > 0 ? (
               <span className="font-medium text-destructive">
