@@ -7,6 +7,8 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  // hide the floating dev-tools indicator bubble (overlaps the sidebar footer)
+  devIndicators: false,
 };
 
 export default nextConfig;

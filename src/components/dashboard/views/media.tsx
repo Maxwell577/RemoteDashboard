@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
@@ -8,6 +8,7 @@ import {
   Clapperboard,
   Download,
   Eye,
+  Loader2,
   Lock,
   Mic,
   MonitorPlay,
@@ -22,6 +23,7 @@ import {
 import {
   api,
   type AppSettings,
+  type Device,
   type MediaAsset,
   type MediaKind,
   type MediaStatus,
@@ -29,6 +31,7 @@ import {
 import { useDash } from '@/lib/store'
 import { cn } from '@/lib/utils'
 import {
+  DeviceSelector,
   EmptyState,
   ErrorBlock,
   LoadingBlock,
@@ -139,11 +142,141 @@ function fmtDurationLabel(durationSec: number | null): string {
   return `${Math.floor(durationSec / 3600)} h`
 }
 
+// ───────────────────────── live view dialog ─────────────────────────
+
+/**
+ * Live screen viewer — one-way socket stream (`screen:frame`).
+ * Frames are rendered straight from the store; nothing is persisted.
+ */
+function LiveViewDialog({
+  device,
+  open,
+  onOpenChange,
+  now,
+}: {
+  device: Device | null
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  now: number
+}) {
+  const liveFrame = useDash((s) => s.liveFrame)
+  const clearLiveFrame = useDash((s) => s.setLiveFrame)
+  const { data: devices } = useDevices()
+  const [fps, setFps] = useState(0)
+  const frameTimes = useRef<number[]>([])
+  const startedAt = useRef<number>(Date.now())
+
+  const frame = useMemo(() => {
+    if (!liveFrame || !device) return null
+    if (liveFrame.agentId === device.id) return liveFrame
+    const matchesAgent = (devices ?? []).some(
+      (d) => d.id === device.id && d.agentId === liveFrame.agentId,
+    )
+    return matchesAgent ? liveFrame : null
+  }, [liveFrame, device, devices])
+
+  // record frame arrivals (one effect per frame, no timers)
+  useEffect(() => {
+    if (!open || frame?.seq == null) return
+    const t = Date.now()
+    frameTimes.current = [...frameTimes.current, t].filter((x) => t - x <= 4000)
+  }, [open, frame?.seq])
+
+  // FPS meter — independent 1s ticker over the trailing 4s window
+  useEffect(() => {
+    if (!open) return
+    const iv = setInterval(() => {
+      const t = Date.now()
+      frameTimes.current = frameTimes.current.filter((x) => t - x <= 4000)
+      setFps(Math.round((frameTimes.current.length / 4) * 10) / 10)
+    }, 1000)
+    return () => clearInterval(iv)
+  }, [open])
+
+  useEffect(() => {
+    if (open) startedAt.current = Date.now()
+  }, [open])
+
+  const stop = useMutation({
+    mutationFn: () =>
+      api<{ ok: true }>('/api/media/live', {
+        method: 'POST',
+        body: JSON.stringify({ deviceId: device?.id, action: 'stop' }),
+      }),
+    onSettled: () => clearLiveFrame(null),
+  })
+
+  const handleClose = (o: boolean) => {
+    if (!o && open) stop.mutate()
+    onOpenChange(o)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleClose}>
+      <DialogContent className="glass-strong sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-70" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-rose-500" />
+            </span>
+            Live view — {device?.hostname ?? 'device'}
+          </DialogTitle>
+          <DialogDescription>
+            Realtime one-way stream over the agent socket · never persisted · encrypted transport
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="overflow-hidden rounded-xl ring-1 ring-border/60">
+          {frame ? (
+            <img
+              src={frame.dataUri}
+              alt={`Live screen of ${device?.hostname ?? 'device'}`}
+              className="w-full object-contain"
+            />
+          ) : (
+            <div className="terminal-glass flex h-72 w-full flex-col items-center justify-center gap-3">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <p className="text-sm text-muted-foreground">Waiting for first frame…</p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className="border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400">
+              LIVE
+            </Badge>
+            <Badge variant="secondary" className="font-mono text-[10px]">{fps} fps</Badge>
+            <Badge variant="secondary" className="font-mono text-[10px]">
+              frame #{frame?.seq ?? 0}
+            </Badge>
+            <Badge variant="secondary" className="font-mono text-[10px]">1600×900</Badge>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="font-mono">{fmtElapsed(now - startedAt.current)} elapsed</span>
+            <Button
+              size="sm"
+              variant="destructive"
+              className="h-9"
+              disabled={stop.isPending}
+              onClick={() => handleClose(false)}
+            >
+              <Square className="h-3.5 w-3.5" /> Stop stream
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ─────────────────────────── view ───────────────────────────────────
 
 export default function MediaView() {
   const qc = useQueryClient()
   const selectedDeviceId = useDash((s) => s.selectedDeviceId)
+  const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
   const { data: devices } = useDevices()
 
   const device = useMemo(
@@ -163,6 +296,7 @@ export default function MediaView() {
   const [durationSec, setDurationSec] = useState('60')
   const [withMic, setWithMic] = useState(false)
   const [preview, setPreview] = useState<MediaAsset | null>(null)
+  const [liveOpen, setLiveOpen] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
   const effectiveQuality = quality ?? settings?.defaultStreamQuality ?? '720p'
@@ -245,6 +379,24 @@ export default function MediaView() {
       }),
   })
 
+  const startLive = useMutation({
+    mutationFn: () =>
+      api<{ ok: true }>('/api/media/live', {
+        method: 'POST',
+        body: JSON.stringify({ deviceId: selectedDeviceId, action: 'start' }),
+      }),
+    onSuccess: () => {
+      toast.success(`Live view started on ${device?.hostname ?? 'device'}`, {
+        description: 'Streaming over the agent socket — stream-only, not persisted',
+      })
+      setLiveOpen(true)
+    },
+    onError: (e) =>
+      toast.error('Live view failed', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
+
   const removeAsset = useMutation({
     mutationFn: (id: string) => api<{ ok: true }>(`/api/media/${id}`, { method: 'DELETE' }),
     onSuccess: () => {
@@ -272,8 +424,11 @@ export default function MediaView() {
         <EmptyState
           icon={<Clapperboard className="h-10 w-10" />}
           title="No device selected"
-          hint="Pick a device from the selector to open the capture studio."
+          hint="Pick a device below to open the capture studio."
         />
+        <div className="mx-auto w-full max-w-sm">
+          <DeviceSelector value={selectedDeviceId} onChange={setSelectedDeviceId} />
+        </div>
       </div>
     )
   }
@@ -311,7 +466,7 @@ export default function MediaView() {
 
       {/* capture console */}
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <Panel className="glass-hover p-6">
+        <Panel className="card-sheen glass-hover p-6">
           <div className="flex flex-col gap-5">
             <div>
               <h3 className="font-semibold">Capture console</h3>
@@ -323,15 +478,31 @@ export default function MediaView() {
               </p>
             </div>
 
-            <Button
-              size="lg"
-              className="h-11 w-full sm:w-auto sm:px-8"
-              disabled={screenshot.isPending}
-              onClick={() => screenshot.mutate()}
-            >
-              <Camera className="h-5 w-5" />
-              {screenshot.isPending ? 'Capturing…' : 'Take screenshot'}
-            </Button>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                size="lg"
+                className="h-11 flex-1 sm:flex-none sm:px-8"
+                disabled={screenshot.isPending}
+                onClick={() => screenshot.mutate()}
+              >
+                <Camera className="h-5 w-5" />
+                {screenshot.isPending ? 'Capturing…' : 'Take screenshot'}
+              </Button>
+              <Button
+                size="lg"
+                variant="outline"
+                className="h-11 flex-1 border-primary/40 sm:flex-none sm:px-6"
+                disabled={startLive.isPending || device?.status !== 'online'}
+                onClick={() => startLive.mutate()}
+              >
+                {startLive.isPending ? (
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                ) : (
+                  <MonitorPlay className="h-5 w-5" />
+                )}
+                {startLive.isPending ? 'Connecting…' : 'Live view'}
+              </Button>
+            </div>
 
             <div className="h-px bg-border/60" role="separator" />
 
@@ -599,6 +770,9 @@ export default function MediaView() {
           )}
         </div>
       </Panel>
+
+      {/* live screen viewer */}
+      <LiveViewDialog device={device} open={liveOpen} onOpenChange={setLiveOpen} now={now} />
 
       {/* preview dialog */}
       <Dialog open={!!preview} onOpenChange={(open) => !open && setPreview(null)}>

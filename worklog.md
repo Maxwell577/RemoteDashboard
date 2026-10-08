@@ -198,3 +198,26 @@ Stage Summary:
 - Version now v0.1.1 feature set: 11 views + command palette + saved commands CRUD + terminal history + inventory export
 - Files: +3 new (command-palette.tsx, kbd.tsx, saved-commands.tsx), edited: store.ts, shell.tsx, overview.tsx, terminal.tsx, devices.tsx, settings.tsx, agent-hub/sim/exec.ts
 - Next-phase candidates: real Windows agent binary (socket protocol in types.ts), Supabase artifact sync, Cloudflare Pages deploy config, NextAuth login, WebSocket live-stream viewer, per-device uptime sparkline history table
+
+---
+Task ID: 7
+Agent: orchestrator (cron review round 2 — QA + live screen viewer + health + enrollment kit)
+Task: Assess project status, agent-browser QA, then add new features + styling polish.
+
+Work Log:
+- STATUS ASSESSMENT: project stable at v0.1.1. Services healthy (Next :3000, hub :3003 single process, gateway :81). Full QA pass: Overview telemetry + per-device bars, Terminal exec (sysinfo → exit 0 • 195ms), Files explorer, Media screenshot + preview dialog, Location map (3 OSM markers, Eswatini), Command palette (Ctrl+K), light/dark, mobile 390px — all PASS, zero console errors. Verdict: no bugs blocking → feature round.
+- FEATURE Live screen viewer (end-to-end): types.ts contract (+`screen:frame` dashboard event, `screen:live:start|stop` agent requests, POST /api/media/live, `ScreenFrame` type); hub.ts DASHBOARD_EVENTS whitelist += "screen:frame"; sim/agent.ts LiveStream (fps 0.5-3, per-frame svgDesktop screenshot pushed as agent:event, stop returns frame count); new route src/app/api/media/live/route.ts (start/stop dispatch + audit, 502 on agent error); store.ts liveFrame/setLiveFrame; realtime.tsx socket handler (resolves agentId→DB id like metrics); media.tsx LiveViewDialog (pulsing LIVE badge, img streamed from store, FPS meter over trailing 4s window, frame #seq, 1600×900 badge, elapsed ticker, Stop stream → API stop + clear frame; close also stops). Verified live: 1 fps, frame #21, stop confirmed by hub log "21 frames streamed".
+- FEATURE Device health score + CPU sparkline: types.ts `computeHealthScore()` (0-100; cpu>30, mem>55, disk>80 deductions; offline caps at 40); store.ts cpuHistory per-device rolling buffer (40 samples, appended in setMetrics); devices.tsx HealthRing (SVG donut, emerald/amber/rose tone, animated stroke), CpuSparkline (SVG polyline + end dot + "collecting samples…" placeholder, peak label), health chip on every card, ring + sparkline + narrative inside Details dialog Live metrics.
+- FEATURE Agent enrollment kit (Settings, wide section): generated PowerShell install command from the hubUrl setting (copy → clipboard + toast), "Download agent config" → sentra-agent.config.json blob (hub url, socket path, heartbeat, AES-256-GCM note, full capability list incl. screen:live:*), hub/heartbeat badges, honest note that the binary ships separately.
+- FEATURE Overview chart stat chips: now/avg/peak badges + "N samples buffered" computed from the rolling buffer; staggered animate-in (70ms/card) on the 6 stat cards.
+- STYLE: next.config.ts devIndicators:false (floating "N" bubble no longer overlaps sidebar footer); globals.css `.card-sheen` diagonal light-sweep on hover (applied to StatCards + Media capture console); src/app/icon.svg emerald shield favicon; version bump v0.1.2 (sidebar + Settings About).
+- FIX Media empty-state dead-end: no-device state now renders a DeviceSelector inline (previously forced a detour through another view).
+- FIX FPS meter race: per-frame effect + independent 1s ticker (old single effect tore down its interval on every frame arrival → always 0).
+- FIX settings PowerShell snippet: template literal swallowed the backslash (`$env:TEMP\sentra-...` rendered as `TEMPsentra`) → escaped.
+- INFRA: hub restarted to pick up sim handlers — NOTE background processes started with plain `nohup … &` or `setsid … & disown` get reaped between tool calls; the surviving pattern is subshell double-fork `(bun run index.ts >> hub.log 2>&1 &)` (hub pid stable across calls since). Dev server had to be fully restarted (rm -rf .next + `bun run dev`) because its in-memory Turbopack graph kept serving a pre-Task-6 saved-commands.tsx (duplicate-Panel error); the browser ALSO cached the broken module — agent-browser close+reopen was required. After both: console 100% clean.
+
+Stage Summary:
+- Version v0.1.2: 11 views + command palette + saved commands + terminal history + CSV exports + LIVE SCREEN VIEWER (socket stream, not persisted) + device health score/ring/sparkline + agent enrollment kit + overview stat chips + card sheen styling.
+- Files: types.ts, store.ts, realtime.tsx, api/media/live/route.ts (new), media.tsx, devices.tsx, settings.tsx, overview.tsx, globals.css, icon.svg (new), next.config.ts, agent-hub/hub.ts, agent-hub/sim/agent.ts.
+- Verified: lint 0, tsc clean (src + mini-services), dev.log + hub.log clean, hub 3/3 agents, live stream round-trip in browser, health chips in light+dark.
+- Next-phase candidates: real Windows agent binary (protocol ready incl. screen:live), Supabase artifact sync, Cloudflare Pages deploy config, NextAuth login, per-view skeleton polish, alert sound toggle.

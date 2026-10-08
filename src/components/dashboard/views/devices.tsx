@@ -18,7 +18,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, type Device, type DeviceType, type MediaAsset } from '@/lib/types'
+import { api, computeHealthScore, type Device, type DeviceType, type MediaAsset } from '@/lib/types'
 import { useDash, type ViewId } from '@/lib/store'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -107,6 +107,103 @@ function MetricBar({ label, value }: { label: string; value: number }) {
   )
 }
 
+/** SVG donut showing a 0-100 health score with a tinted arc. */
+function HealthRing({ score, size = 64 }: { score: number; size?: number }) {
+  const stroke = 6
+  const r = (size - stroke) / 2
+  const c = 2 * Math.PI * r
+  const pct = Math.min(100, Math.max(0, score))
+  const color =
+    score >= 80
+      ? 'oklch(0.72 0.14 168)' // emerald
+      : score >= 55
+        ? 'oklch(0.8 0.14 85)' // amber
+        : 'oklch(0.7 0.19 22)' // rose
+  return (
+    <div
+      className="relative shrink-0"
+      style={{ width: size, height: size }}
+      role="img"
+      aria-label={`Health score ${score} of 100`}
+    >
+      <svg width={size} height={size} className="-rotate-90">
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke="currentColor"
+          className="text-border/60"
+          strokeWidth={stroke}
+        />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke={color}
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={`${(pct / 100) * c} ${c}`}
+          style={{ transition: 'stroke-dasharray 600ms cubic-bezier(0.22,1,0.36,1)' }}
+        />
+      </svg>
+      <span
+        className="absolute inset-0 flex items-center justify-center font-mono text-sm font-semibold"
+        style={{ color }}
+      >
+        {score}
+      </span>
+    </div>
+  )
+}
+
+/** Tiny inline CPU% sparkline from the live telemetry buffer. */
+function CpuSparkline({ history, className }: { history: number[]; className?: string }) {
+  const w = 220
+  const h = 48
+  if (history.length < 2) {
+    return (
+      <div className={cn('flex items-center justify-center text-[11px] text-muted-foreground', className)} style={{ height: h }}>
+        collecting samples…
+      </div>
+    )
+  }
+  const pts = history
+    .map((v, i) => {
+      const x = (i / (history.length - 1)) * w
+      const y = h - (Math.min(100, Math.max(0, v)) / 100) * (h - 6) - 3
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+  const last = history[history.length - 1]
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className={cn('w-full', className)} style={{ height: h }} aria-hidden>
+      <polyline
+        points={pts}
+        fill="none"
+        stroke="currentColor"
+        className="text-primary"
+        strokeWidth="2"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+      <circle
+        cx={w}
+        cy={h - (Math.min(100, Math.max(0, last)) / 100) * (h - 6) - 3}
+        r="3"
+        className="fill-primary"
+      />
+    </svg>
+  )
+}
+
+function healthTone(score: number): string {
+  if (score >= 80) return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+  if (score >= 55) return 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+  return 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+}
+
 // ───────────────────────── details dialog body ──────────────────────
 
 function DeviceDetailsBody({ device, close }: { device: Device; close: () => void }) {
@@ -114,7 +211,16 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
   const setView = useDash((s) => s.setView)
   const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
   const metricsByDevice = useDash((s) => s.metricsByDevice)
+  const cpuHistory = useDash((s) => s.cpuHistory)
   const m = metricsByDevice[device.id]
+  const history = cpuHistory[device.id] ?? []
+  const health = computeHealthScore({
+    online: device.status === 'online',
+    cpuPercent: m?.cpuPercent,
+    memoryPercent: m?.memoryPercent,
+    diskPercent: m?.diskPercent,
+    stale: device.status === 'online' && !m,
+  })
 
   const [notes, setNotes] = useState(device.notes ?? '')
   const [saving, setSaving] = useState(false)
@@ -203,8 +309,30 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
       </div>
 
       <DetailSection title="Live metrics">
+        <div className="flex items-center gap-4 pb-1">
+          <HealthRing score={health} />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium">Health score</p>
+            <p className="text-[11px] text-muted-foreground">
+              {device.status !== 'online'
+                ? 'offline — capped penalty score'
+                : health >= 80
+                  ? 'nominal — no resource pressure'
+                  : health >= 55
+                    ? 'elevated load on this machine'
+                    : 'saturated — needs attention'}
+            </p>
+          </div>
+        </div>
+        <div className="glass-inset rounded-lg px-2 pb-1 pt-2">
+          <div className="flex items-center justify-between px-1 text-[11px] text-muted-foreground">
+            <span>CPU — last {history.length || 0} samples</span>
+            <span className="font-mono">peak {history.length ? Math.round(Math.max(...history)) : '—'}%</span>
+          </div>
+          <CpuSparkline history={history} />
+        </div>
         {m ? (
-          <div className="flex flex-col gap-2.5">
+          <div className="mt-1 flex flex-col gap-2.5">
             <MetricBar label="CPU" value={m.cpuPercent} />
             <MetricBar label="Memory" value={m.memoryPercent} />
             <MetricBar label="Disk" value={m.diskPercent} />
@@ -219,7 +347,7 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
             </div>
           </div>
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="mt-1 text-xs text-muted-foreground">
             {device.status === 'online'
               ? 'Waiting for telemetry…'
               : 'Device offline — no live metrics.'}
@@ -346,6 +474,13 @@ function DeviceCard({ device }: { device: Device }) {
   const Icon = TYPE_ICON[device.deviceType]
   const online = device.status === 'online'
   const m = online ? metricsByDevice[device.id] : undefined
+  const health = computeHealthScore({
+    online,
+    cpuPercent: m?.cpuPercent,
+    memoryPercent: m?.memoryPercent,
+    diskPercent: m?.diskPercent,
+    stale: online && !m,
+  })
 
   const go = (v: ViewId) => {
     setSelectedDeviceId(device.id)
@@ -377,6 +512,20 @@ function DeviceCard({ device }: { device: Device }) {
         </div>
 
         <dl className="mt-3 flex flex-col gap-1 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <dt className="flex items-center gap-1.5 text-muted-foreground">
+              Health
+              <span
+                className={cn(
+                  'rounded-full border px-1.5 py-px font-mono text-[10px] font-semibold',
+                  healthTone(health),
+                )}
+              >
+                {health}
+              </span>
+            </dt>
+            <dd className="min-w-0 truncate text-right font-medium">{online ? 'live' : 'offline'}</dd>
+          </div>
           <div className="flex items-baseline justify-between gap-3">
             <dt className="shrink-0 text-muted-foreground">CPU</dt>
             <dd className="min-w-0 truncate text-right font-medium">{device.cpuModel ?? '—'}</dd>

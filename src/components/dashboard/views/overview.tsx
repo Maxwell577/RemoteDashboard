@@ -83,7 +83,7 @@ function StatCard({
     zinc: 'text-zinc-500 dark:text-zinc-400',
   } as const
   return (
-    <Panel className="glass-hover group relative overflow-hidden p-4">
+    <Panel className="card-sheen glass-hover group relative overflow-hidden p-4">
       {/* corner sheen for the liquid-glass look */}
       <div
         aria-hidden
@@ -172,6 +172,18 @@ export default function Overview() {
     [cpuSamples],
   )
 
+  // Chart summary chips — computed from the rolling buffer
+  const chartStats = useMemo(() => {
+    const vals = cpuSamples.filter((v): v is number => v != null)
+    if (vals.length === 0) return null
+    return {
+      last: vals[vals.length - 1],
+      avg: Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10,
+      peak: Math.round(Math.max(...vals) * 10) / 10,
+      samples: vals.length,
+    }
+  }, [cpuSamples])
+
   const glance = deviceList.slice(0, 6)
 
   return (
@@ -184,56 +196,74 @@ export default function Overview() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-6">
-        <StatCard
-          icon={<MonitorSmartphone />}
-          label="Total devices"
-          value={stats?.totalDevices ?? deviceList.length}
-          subtitle={<>{onlineCount} online</>}
-          tint="emerald"
-        />
-        <StatCard
-          icon={<span className="status-dot status-dot--static bg-emerald-500" />}
-          label="Online now"
-          value={onlineCount}
-          subtitle="agents reporting in"
-          tint="teal"
-        />
-        <StatCard
-          icon={<SquareTerminal />}
-          label="Commands today"
-          value={stats?.commandsToday ?? '—'}
-          subtitle="executions since midnight"
-          tint="zinc"
-        />
-        <StatCard
-          icon={<Clapperboard />}
-          label="Active media"
-          value={stats?.activeCaptures ?? '—'}
-          subtitle="media captures running"
-          tint="teal"
-        />
-        <StatCard
-          icon={<RadioTower />}
-          label="Net captures"
-          value={stats?.runningNetCaptures ?? '—'}
-          subtitle="packet captures live"
-          tint="amber"
-        />
-        <StatCard
-          icon={<Bell />}
-          label="Unack alerts"
-          value={stats?.unackAlerts ?? '—'}
-          tint={stats && stats.unackAlerts > 0 ? 'amber' : 'zinc'}
-          subtitle={
-            stats && stats.criticalAlerts > 0 ? (
-              <span className="font-medium text-destructive">
-                {stats.criticalAlerts} critical
-              </span>
-            ) : (
-              'nothing critical'
-            )
-          }
-        />
+        {(
+          [
+            <StatCard
+              key="devices"
+              icon={<MonitorSmartphone />}
+              label="Total devices"
+              value={stats?.totalDevices ?? deviceList.length}
+              subtitle={<>{onlineCount} online</>}
+              tint="emerald"
+            />,
+            <StatCard
+              key="online"
+              icon={<span className="status-dot status-dot--static bg-emerald-500" />}
+              label="Online now"
+              value={onlineCount}
+              subtitle="agents reporting in"
+              tint="teal"
+            />,
+            <StatCard
+              key="commands"
+              icon={<SquareTerminal />}
+              label="Commands today"
+              value={stats?.commandsToday ?? '—'}
+              subtitle="executions since midnight"
+              tint="zinc"
+            />,
+            <StatCard
+              key="media"
+              icon={<Clapperboard />}
+              label="Active media"
+              value={stats?.activeCaptures ?? '—'}
+              subtitle="media captures running"
+              tint="teal"
+            />,
+            <StatCard
+              key="net"
+              icon={<RadioTower />}
+              label="Net captures"
+              value={stats?.runningNetCaptures ?? '—'}
+              subtitle="packet captures live"
+              tint="amber"
+            />,
+            <StatCard
+              key="alerts"
+              icon={<Bell />}
+              label="Unack alerts"
+              value={stats?.unackAlerts ?? '—'}
+              tint={stats && stats.unackAlerts > 0 ? 'amber' : 'zinc'}
+              subtitle={
+                stats && stats.criticalAlerts > 0 ? (
+                  <span className="font-medium text-destructive">
+                    {stats.criticalAlerts} critical
+                  </span>
+                ) : (
+                  'nothing critical'
+                )
+              }
+            />,
+          ] as const
+        ).map((card, i) => (
+          <div
+            key={i}
+            className="animate-in fade-in slide-in-from-bottom-3 fill-mode-both duration-500"
+            style={{ animationDelay: `${i * 70}ms` }}
+          >
+            {card}
+          </div>
+        ))}
       </div>
 
       {/* Live performance + devices at a glance */}
@@ -254,6 +284,20 @@ export default function Overview() {
               live
             </Badge>
           </div>
+
+          {chartStats ? (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Badge
+                variant="outline"
+                className="border-emerald-500/30 bg-emerald-500/10 font-mono text-[11px] text-emerald-600 dark:text-emerald-400"
+              >
+                now {chartStats.last}%
+              </Badge>
+              <Badge variant="secondary" className="font-mono text-[11px]">avg {chartStats.avg}%</Badge>
+              <Badge variant="secondary" className="font-mono text-[11px]">peak {chartStats.peak}%</Badge>
+              <span className="text-[11px] text-muted-foreground">{chartStats.samples} samples buffered</span>
+            </div>
+          ) : null}
 
           <div className="mt-4 grid gap-6 lg:grid-cols-5">
             {/* Aggregate CPU area chart */}

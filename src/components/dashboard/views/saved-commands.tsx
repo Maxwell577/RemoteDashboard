@@ -1,5 +1,7 @@
 'use client'
 
+// Saved Commands manager (see component docblock below).
+
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'

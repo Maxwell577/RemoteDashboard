@@ -248,6 +248,32 @@ export interface DashboardStats {
   auditEvents: number;
 }
 
+// ───────────────────────── Device health score ──────────────────────
+
+/**
+ * Composite 0-100 health score from live telemetry (frontend-computed).
+ * 100 = idle healthy machine; deductions for CPU/MEM/DISK pressure + penalties
+ * for stale telemetry or offline status.
+ */
+export function computeHealthScore(input: {
+  online: boolean;
+  cpuPercent?: number | null;
+  memoryPercent?: number | null;
+  diskPercent?: number | null;
+  stale?: boolean;
+}): number {
+  if (!input.online) return 40;
+  let score = 100;
+  const cpu = input.cpuPercent ?? 0;
+  const mem = input.memoryPercent ?? 0;
+  const disk = input.diskPercent ?? 0;
+  score -= Math.max(0, cpu - 30) * 0.5; // heavy CPU load hurts most
+  score -= Math.max(0, mem - 55) * 0.6; // memory pressure is critical
+  score -= Math.max(0, disk - 80) * 0.8; // nearly-full disks are a risk
+  if (input.stale) score -= 10;
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
 // ─────────────────────────── Settings blob ─────────────────────────
 
 export interface AppSettings {
@@ -315,6 +341,7 @@ export type ApiResult<T> = ApiOk<T> | ApiErr;
  * POST /api/media/screenshot            body: { deviceId }           → MediaAsset (with dataRef, sync)
  * POST /api/media/record                body: { deviceId, kind, quality, durationSec, withMic } → MediaAsset (async)
  * POST /api/media/stop                  body: { assetId }            → MediaAsset
+ * POST /api/media/live                  body: { deviceId, action: "start"|"stop" } → { ok, agentId } (frames via socket `screen:frame`)
  * DELETE /api/media/[id]                → { ok }
  *
  * GET  /api/network?deviceId=           → NetworkCapture[]
@@ -360,6 +387,7 @@ export type ApiResult<T> = ApiOk<T> | ApiErr;
 //   "media:update"    { asset: MediaAsset }
 //   "network:update"  { capture: NetworkCapture }
 //   "alert:new"       { alert: Alert }
+//   "screen:frame"    { agentId, dataUri, ts, seq, width, height }  (live screen viewer stream)
 // Hub internal (agent ↔ hub):
 //   "agent:register"  { info: AgentInfo }            ack → { ok }
 //   "agent:heartbeat" { agentId, metrics, location? }
@@ -382,6 +410,20 @@ export type ApiResult<T> = ApiOk<T> | ApiErr;
 //   "net:start"   { captureId, iface, filterBpf } → ack { started } (stats via HTTP)
 //   "net:stop"    { captureId }            → { packets, bytesCaptured }
 //   "location:fix" {}                      → { lat, lon, accuracyM, label, source }
+//   "screen:live:start" { fps }            → ack { started, fps } (frames via `screen:frame` until stop)
+//   "screen:live:stop"  {}                 → { frames }
+
+// ───────────────────────── Live screen viewer ───────────────────────
+
+/** One pushed frame of the live screen viewer (socket event `screen:frame`). */
+export interface ScreenFrame {
+  agentId: string;
+  dataUri: string;
+  ts: number; // epoch ms at the agent
+  seq: number; // monotonically increasing per stream
+  width: number;
+  height: number;
+}
 
 // ─────────────────────────── Helper types ──────────────────────────
 

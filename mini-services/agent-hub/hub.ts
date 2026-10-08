@@ -65,7 +65,7 @@ interface DispatchResult {
   error?: string;
 }
 
-const DASHBOARD_EVENTS = new Set(["media:update", "network:update", "alert:new"]);
+const DASHBOARD_EVENTS = new Set(["media:update", "network:update", "alert:new", "screen:frame"]);
 const HUB_HEADERS = { "x-hub-token": CONFIG.hubToken };
 
 function deviceFromInfo(info: AgentInfo, status: "online" | "offline"): Record<string, unknown> {

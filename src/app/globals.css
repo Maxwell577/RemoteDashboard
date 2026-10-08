@@ -252,6 +252,41 @@
   background: oklch(0.22 0.02 185 / 96%);
 }
 
+/* sheen sweep — diagonal light bar that crosses a card on hover */
+.card-sheen {
+  position: relative;
+  overflow: hidden;
+}
+
+.card-sheen::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  background: linear-gradient(
+    105deg,
+    transparent 42%,
+    oklch(1 0 0 / 16%) 50%,
+    transparent 58%
+  );
+  transform: translateX(-130%);
+  transition: transform 900ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.dark .card-sheen::before {
+  background: linear-gradient(
+    105deg,
+    transparent 42%,
+    oklch(1 0 0 / 9%) 50%,
+    transparent 58%
+  );
+}
+
+.card-sheen:hover::before {
+  transform: translateX(130%);
+}
+
 /* slim scrollbars for long lists */
 .scroll-slim::-webkit-scrollbar {
   width: 6px;

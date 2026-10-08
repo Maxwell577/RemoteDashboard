@@ -37,6 +37,13 @@ interface NetCapture {
   timer: ReturnType<typeof setInterval> | null;
 }
 
+interface LiveStream {
+  seq: number;
+  fps: number;
+  startedAt: number;
+  timer: ReturnType<typeof setInterval> | null;
+}
+
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
 export class SimAgent {
@@ -49,6 +56,7 @@ export class SimAgent {
   private cpuHistory: number[] = [];
   private readonly media = new Map<string, MediaCapture>();
   private readonly net = new Map<string, NetCapture>();
+  private live: LiveStream | null = null;
   private stopped = false;
 
   constructor(readonly def: DeviceDef) {
@@ -96,6 +104,8 @@ export class SimAgent {
       if (cap.timer) clearInterval(cap.timer);
     }
     this.net.clear();
+    if (this.live?.timer) clearInterval(this.live.timer);
+    this.live = null;
     this.socket.disconnect();
   }
 
@@ -206,6 +216,10 @@ export class SimAgent {
         return this.stopNetCapture(str(p.captureId));
       case "location:fix":
         return this.locationFix();
+      case "screen:live:start":
+        return this.startLiveStream(p);
+      case "screen:live:stop":
+        return this.stopLiveStream();
       default:
         throw new Error(`Unknown request type '${type}'`);
     }
@@ -309,6 +323,43 @@ export class SimAgent {
       { assetId: cap.assetId, status, sizeBytes, dataRef },
       { "x-hub-token": CONFIG.hubToken },
     );
+  }
+
+  // ── live screen stream ────────────────────────────────────────────────
+
+  private startLiveStream(p: Record<string, unknown>): { started: true; fps: number } {
+    if (this.live) throw new Error("A live screen stream is already running");
+    const fps = Math.min(3, Math.max(0.5, typeof p.fps === "number" && p.fps > 0 ? p.fps : 1));
+    const stream: LiveStream = { seq: 0, fps, startedAt: Date.now(), timer: null };
+    this.live = stream;
+    const interval = Math.round(1000 / fps);
+    stream.timer = setInterval(() => {
+      if (!this.live || this.stopped || !this.socket.connected) return;
+      stream.seq += 1;
+      const shot = this.screenshot();
+      this.socket.emit("agent:event", {
+        name: "screen:frame",
+        payload: {
+          agentId: this.def.info.agentId,
+          dataUri: shot.dataUri,
+          ts: Date.now(),
+          seq: stream.seq,
+          width: 1600,
+          height: 900,
+        },
+      });
+    }, interval);
+    this.log(`screen:live started (${fps} fps)`);
+    return { started: true, fps };
+  }
+
+  private stopLiveStream(): { frames: number } {
+    const stream = this.live;
+    if (!stream) return { frames: 0 };
+    if (stream.timer) clearInterval(stream.timer);
+    this.live = null;
+    this.log(`screen:live stopped (${stream.seq} frames streamed)`);
+    return { frames: stream.seq };
   }
 
   // ── network capture ───────────────────────────────────────────────────

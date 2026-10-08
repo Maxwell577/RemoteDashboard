@@ -5,7 +5,7 @@ import { io, type Socket } from 'socket.io-client'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { useDash } from '@/lib/store'
-import type { Alert, Device, DeviceMetrics } from '@/lib/types'
+import type { Alert, Device, DeviceMetrics, ScreenFrame } from '@/lib/types'
 
 /**
  * Mounted once inside the dashboard shell.
@@ -17,6 +17,7 @@ export default function Realtime() {
   const setMetrics = useDash((s) => s.setMetrics)
   const setHubOnline = useDash((s) => s.setHubOnline)
   const bumpUnread = useDash((s) => s.bumpUnreadAlerts)
+  const setLiveFrame = useDash((s) => s.setLiveFrame)
 
   useEffect(() => {
     const socket: Socket = io('/?XTransformPort=3003', { path: '/' })
@@ -64,10 +65,20 @@ export default function Realtime() {
       bumpUnread()
     })
 
+    // Live screen viewer stream — frames arrive keyed by agentId; also store
+    // under the DB id so the media view can filter by selectedDeviceId.
+    socket.on('screen:frame', (p: ScreenFrame) => {
+      if (!p?.agentId || typeof p.dataUri !== 'string') return
+      setLiveFrame(p)
+      const devices = qc.getQueryData<Device[]>(['devices'])
+      const dev = devices?.find((d) => d.agentId === p.agentId)
+      if (dev && dev.id !== p.agentId) setLiveFrame({ ...p, agentId: dev.id })
+    })
+
     return () => {
       socket.close()
     }
-  }, [qc, setMetrics, setHubOnline, bumpUnread])
+  }, [qc, setMetrics, setHubOnline, bumpUnread, setLiveFrame])
 
   // poll hub status every 30s
   useEffect(() => {

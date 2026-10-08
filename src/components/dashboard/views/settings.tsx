@@ -6,12 +6,16 @@ import { toast } from 'sonner'
 import {
   Clapperboard,
   Cloud,
+  Copy,
+  Download,
   Eye,
   EyeOff,
   KeyRound,
   BellRing,
   ShieldCheck,
+  TerminalSquare,
   TriangleAlert,
+  UserPlus,
   type LucideIcon,
 } from 'lucide-react'
 import { api, type AppSettings } from '@/lib/types'
@@ -111,7 +115,99 @@ function SwitchRow({
   )
 }
 
-// ─────────────────────────── view ───────────────────────────────────
+// ─────────────────────── agent enrollment kit ───────────────────────
+
+function AgentEnrollment({ hubUrl, heartbeatSec }: { hubUrl: string; heartbeatSec: number }) {
+  const hub = hubUrl?.trim() || 'http://127.0.0.1:3003'
+  const installCmd = `$hub = "${hub}"            # realtime hub endpoint
+$token = "<your-hub-token>"   # x-hub-token shared secret (keep private)
+irm "$hub/agent/install.ps1" -OutFile "$env:TEMP\\sentra-install.ps1"
+pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -Hub $hub -Token $token`
+
+  const copyCmd = async () => {
+    try {
+      await navigator.clipboard.writeText(installCmd)
+      toast.success('Install command copied', {
+        description: 'Paste into an elevated PowerShell window on the target machine.',
+      })
+    } catch {
+      toast.error('Clipboard unavailable — select the text manually')
+    }
+  }
+
+  const downloadConfig = () => {
+    const config = {
+      hubUrl: hub,
+      socketPath: '/',
+      heartbeatIntervalSec: heartbeatSec,
+      encryption: { algorithm: 'AES-256-GCM', keySource: 'dashboard capturePassword' },
+      capabilities: [
+        'exec', 'fs:list', 'fs:download', 'fs:upload', 'fs:delete', 'fs:rename', 'fs:mkdir',
+        'ps:list', 'ps:action', 'media:screenshot', 'media:record', 'media:stop',
+        'net:start', 'net:stop', 'location:fix', 'screen:live:start', 'screen:live:stop',
+      ],
+      notes: 'SentraRMM agent config — the agent binary ships separately in the open-source repo.',
+      generatedAt: new Date().toISOString(),
+    }
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' }),
+    )
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'sentra-agent.config.json'
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success('Agent config downloaded', { description: 'sentra-agent.config.json' })
+  }
+
+  return (
+    <Panel className="glass-hover p-6">
+      <div className="flex items-start gap-3">
+        <div className="glass-inset flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-primary">
+          <UserPlus className="h-5 w-5" />
+        </div>
+        <div className="min-w-0">
+          <h3 className="font-semibold leading-tight">Agent enrollment</h3>
+          <p className="text-sm text-muted-foreground">
+            Generate the install command + config your Windows agent consumes.
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-col gap-3">
+        <div className="glass-inset relative rounded-xl">
+          <div className="flex items-center justify-between gap-2 border-b border-border/40 px-3 py-2">
+            <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <TerminalSquare className="h-3.5 w-3.5" /> PowerShell — run as Administrator
+            </span>
+            <Button size="sm" variant="ghost" className="h-8 gap-1.5 px-2" onClick={() => void copyCmd()}>
+              <Copy className="h-3.5 w-3.5" /> Copy
+            </Button>
+          </div>
+          <pre className="scroll-slim overflow-x-auto px-3 py-2.5 font-mono text-xs leading-relaxed text-emerald-700 dark:text-emerald-300">
+            {installCmd}
+          </pre>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" className="h-9 gap-1.5" onClick={downloadConfig}>
+            <Download className="h-3.5 w-3.5" /> Download agent config
+          </Button>
+          <Badge variant="secondary" className="font-mono text-[10px]">hub: {hub}</Badge>
+          <Badge variant="secondary" className="font-mono text-[10px]">heartbeat: {heartbeatSec}s</Badge>
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          The agent binary ships separately in the open-source repository — this kit generates the
+          config + install command it consumes. New enrollments raise an info alert (configurable
+          above) and appear in Devices automatically.
+        </p>
+      </div>
+    </Panel>
+  )
+}
+
+// ─────────────────────────── view ─────────────────────────────────────
 
 export default function SettingsView() {
   const qc = useQueryClient()
@@ -347,6 +443,13 @@ export default function SettingsView() {
           />
         </SectionCard>
 
+        {/* 3-b. Agent enrollment — wide */}
+        <div className="lg:col-span-2">
+          {form ? (
+            <AgentEnrollment hubUrl={form.hubUrl} heartbeatSec={form.heartbeatIntervalSec} />
+          ) : null}
+        </div>
+
         {/* 4. Integrations */}
         <SectionCard
           icon={Cloud}
@@ -420,7 +523,7 @@ export default function SettingsView() {
             </div>
             <div className="min-w-0 flex-1">
               <h3 className="font-semibold leading-tight">
-                About <span className="text-gradient">SentraRMM v0.1.0</span>
+                About <span className="text-gradient">SentraRMM v0.1.2</span>
               </h3>
               <p className="mt-1 text-sm text-muted-foreground">
                 Open-source, authorized-use RMM for your own fleet and security assessments.
