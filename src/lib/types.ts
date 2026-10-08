@@ -290,6 +290,72 @@ export function computeHealthScore(input: {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
+// ─────────────────────────── Alert rules engine ────────────────────
+
+export type AlertMetric = "cpu" | "memory" | "disk";
+export type AlertRuleOp = "gt" | "lt";
+
+/**
+ * A threshold rule evaluated against every device heartbeat. Rules live in
+ * the Setting table under key "alertRules" (JSON array). When a device's
+ * telemetry crosses the threshold, an Alert row is created — rate-limited by
+ * `cooldownMin` per device+rule and suppressed while maintenance is open.
+ */
+export interface AlertRule {
+  id: string;
+  name: string; // "High CPU load" — used in the alert title
+  metric: AlertMetric;
+  op: AlertRuleOp; // gt = above, lt = below
+  threshold: number; // percent 0-100
+  severity: "info" | "warning" | "critical";
+  cooldownMin: number; // min minutes between repeat alerts for the same device
+  enabled: boolean;
+}
+
+export const DEFAULT_ALERT_RULES: AlertRule[] = [
+  {
+    id: "rule-cpu-high",
+    name: "High CPU load",
+    metric: "cpu",
+    op: "gt",
+    threshold: 60,
+    severity: "warning",
+    cooldownMin: 15,
+    enabled: true,
+  },
+  {
+    id: "rule-mem-pressure",
+    name: "Memory pressure",
+    metric: "memory",
+    op: "gt",
+    threshold: 65,
+    severity: "warning",
+    cooldownMin: 15,
+    enabled: true,
+  },
+  {
+    id: "rule-disk-full",
+    name: "Disk almost full",
+    metric: "disk",
+    op: "gt",
+    threshold: 70,
+    severity: "warning",
+    cooldownMin: 60,
+    enabled: true,
+  },
+];
+
+export const METRIC_LABELS: Record<AlertMetric, string> = {
+  cpu: "CPU",
+  memory: "Memory",
+  disk: "Disk",
+};
+
+/** Human-readable condition, e.g. "CPU above 60%". */
+export function describeRule(r: Pick<AlertRule, "metric" | "op" | "threshold">): string {
+  return `${METRIC_LABELS[r.metric]} ${r.op === "gt" ? "above" : "below"} ${r.threshold}%`;
+}
+
 // ─────────────────────────── Settings blob ─────────────────────────
 
 export interface AppSettings {
@@ -299,6 +365,8 @@ export interface AppSettings {
   heartbeatIntervalSec: number;
   alertsOnOffline: boolean;
   alertsOnNewDevice: boolean;
+  /** master switch for the threshold rules engine (individual rules also have their own flag) */
+  alertRulesEnabled: boolean;
   inMemoryModeDefault: boolean;
   supabaseUrl: string;
   supabaseBucket: string;
@@ -312,6 +380,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   heartbeatIntervalSec: 15,
   alertsOnOffline: true,
   alertsOnNewDevice: true,
+  alertRulesEnabled: true,
   inMemoryModeDefault: true,
   supabaseUrl: "",
   supabaseBucket: "sentrarmm-artifacts",
@@ -369,6 +438,13 @@ export type ApiResult<T> = ApiOk<T> | ApiErr;
  *
  * GET  /api/alerts?unackOnly=1&limit=   → Alert[]
  * POST /api/alerts/[id]/ack             → Alert
+ * POST /api/alerts/clear-acked          → { deleted: number }
+ *
+ * GET  /api/alert-rules                 → AlertRule[]
+ * PUT  /api/alert-rules                 body: AlertRule[] → AlertRule[] (full replace, validated)
+ * POST /api/alert-rules/evaluate        body: { entries: [{ deviceId, hostname, cpu, memory, disk }] } → { fired, results }
+ *
+ * POST /api/devices/bulk                body: { ids, action: "maintenance"|"addTag"|"removeTag", value } → { updated }
  *
  * GET  /api/audit?deviceId=&limit=      → AuditLog[]
  *
@@ -382,7 +458,7 @@ export type ApiResult<T> = ApiOk<T> | ApiErr;
  * GET  /api/hub/status                  → { online: boolean, agents: { agentId, hostname, connected, lastSeen }[] }
  *
  * Internal (hub → api, shared-secret header x-hub-token):
- * POST /api/internal/heartbeat          body: { agentId, metrics, status, location? } → { ok }
+ * POST /api/internal/heartbeat          body: { agentId, metrics, status, location? } → { ok, fired: Alert[] } (fired = rule-engine alerts, relayed by the hub)
  * POST /api/internal/devices/register   body: device info            → Device
  * POST /api/internal/commands/result    body: { commandId, status, output, exitCode, durationMs } → { ok }
  * POST /api/internal/media/result       body: { assetId, status, dataRef?, sizeBytes?, error? }   → { ok }

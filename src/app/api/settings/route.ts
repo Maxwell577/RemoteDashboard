@@ -31,6 +31,7 @@ function mergeSettings(current: AppSettings, patch: Record<string, unknown>): Ap
   }
   if (typeof patch.alertsOnOffline === "boolean") next.alertsOnOffline = patch.alertsOnOffline;
   if (typeof patch.alertsOnNewDevice === "boolean") next.alertsOnNewDevice = patch.alertsOnNewDevice;
+  if (typeof patch.alertRulesEnabled === "boolean") next.alertRulesEnabled = patch.alertRulesEnabled;
   if (typeof patch.inMemoryModeDefault === "boolean") next.inMemoryModeDefault = patch.inMemoryModeDefault;
   if (typeof patch.supabaseUrl === "string") next.supabaseUrl = patch.supabaseUrl;
   if (typeof patch.supabaseBucket === "string") next.supabaseBucket = patch.supabaseBucket;

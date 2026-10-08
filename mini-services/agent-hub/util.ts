@@ -77,6 +77,19 @@ export async function postJson(
   body: unknown,
   headers?: Record<string, string>,
 ): Promise<boolean> {
+  return (await postJsonBody(url, body, headers)) !== null;
+}
+
+/**
+ * Like postJson but resolves with the parsed response body on HTTP 200
+ * (null on any failure). Used where the backend returns useful data, e.g.
+ * the rule-engine alerts fired during a heartbeat.
+ */
+export async function postJsonBody(
+  url: string,
+  body: unknown,
+  headers?: Record<string, string>,
+): Promise<Record<string, unknown> | null> {
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -86,12 +99,15 @@ export async function postJson(
     });
     if (!res.ok) {
       console.warn(`[HUB] POST ${url} → HTTP ${res.status} (ignored, will retry)`);
-      return false;
+      return null;
     }
-    return true;
+    const text = await res.text();
+    if (!text) return {};
+    const parsed = JSON.parse(text) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[HUB] POST ${url} failed: ${msg} (ignored, will retry)`);
-    return false;
+    return null;
   }
 }

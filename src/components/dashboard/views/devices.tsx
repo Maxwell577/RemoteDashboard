@@ -10,12 +10,14 @@ import {
   FolderTree,
   Info,
   Laptop,
+  ListChecks,
   Loader2,
   MapPin,
   Monitor,
   MonitorSmartphone,
   Search,
   Server,
+  SquareCheckBig,
   SquareTerminal,
   Star,
   Tag,
@@ -37,6 +39,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -528,7 +531,19 @@ function DeviceDetailsDialog({
 
 // ─────────────────────────── device card ────────────────────────────
 
-function DeviceCard({ device }: { device: Device }) {
+function DeviceCard({
+  device,
+  index,
+  selectMode,
+  selected,
+  onToggleSelect,
+}: {
+  device: Device
+  index: number
+  selectMode: boolean
+  selected: boolean
+  onToggleSelect: (id: string) => void
+}) {
   const setView = useDash((s) => s.setView)
   const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
   const metricsByDevice = useDash((s) => s.metricsByDevice)
@@ -556,11 +571,29 @@ function DeviceCard({ device }: { device: Device }) {
     <>
       <Panel
         className={cn(
-          'glass-hover flex flex-col p-4',
+          'glass-hover relative flex flex-col p-4 transition-shadow',
           !online && 'opacity-80',
-          pinned && 'ring-1 ring-primary/30',
+          pinned && !selectMode && 'ring-1 ring-primary/30',
+          selectMode && selected && 'ring-2 ring-primary/50 shadow-lg shadow-primary/10',
         )}
+        style={{ animation: `animate-in-up 360ms cubic-bezier(0.22,1,0.36,1) ${Math.min(index, 8) * 60}ms both` }}
       >
+        {selectMode ? (
+          <button
+            type="button"
+            aria-pressed={selected}
+            aria-label={selected ? `Deselect ${device.hostname}` : `Select ${device.hostname}`}
+            onClick={() => onToggleSelect(device.id)}
+            className={cn(
+              'absolute right-3 top-3 z-10 flex size-6 items-center justify-center rounded-md border transition-all',
+              selected
+                ? 'border-primary bg-primary text-primary-foreground shadow-inner'
+                : 'border-border/70 bg-background/60 hover:border-primary/50 hover:bg-primary/10',
+            )}
+          >
+            {selected ? <SquareCheckBig className="size-4" aria-hidden /> : null}
+          </button>
+        ) : null}
         <div className="flex items-start gap-2.5">
           <span className="mt-1.5">
             <StatusDot online={online} />
@@ -584,22 +617,24 @@ function DeviceCard({ device }: { device: Device }) {
                 {device.hostname}
               </h3>
               <TypeIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-              <button
-                type="button"
-                aria-label={pinned ? `Unpin ${device.hostname}` : `Pin ${device.hostname}`}
-                aria-pressed={pinned}
-                title={pinned ? 'Unpin device' : 'Pin to top'}
-                onClick={() => togglePinned(device.id)}
-                className="ml-auto shrink-0 rounded-md p-1 text-muted-foreground/50 outline-none transition-all hover:bg-primary/10 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring/50"
-              >
-                <Star
-                  className={cn(
-                    'size-4 transition-colors',
-                    pinned && 'fill-primary text-primary',
-                  )}
-                  aria-hidden
-                />
-              </button>
+              {!selectMode ? (
+                <button
+                  type="button"
+                  aria-label={pinned ? `Unpin ${device.hostname}` : `Pin ${device.hostname}`}
+                  aria-pressed={pinned}
+                  title={pinned ? 'Unpin device' : 'Pin to top'}
+                  onClick={() => togglePinned(device.id)}
+                  className="ml-auto shrink-0 rounded-md p-1 text-muted-foreground/50 outline-none transition-all hover:bg-primary/10 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <Star
+                    className={cn(
+                      'size-4 transition-colors',
+                      pinned && 'fill-primary text-primary',
+                    )}
+                    aria-hidden
+                  />
+                </button>
+              ) : null}
             </div>
             <div className="mt-0.5 flex items-center gap-1.5">
               <p
@@ -759,10 +794,16 @@ function StatusFilterPill({
 
 export default function Devices() {
   const { data: devices, isLoading, error } = useDevices()
+  const qc = useQueryClient()
 
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [tagDialogOpen, setTagDialogOpen] = useState(false)
+  const [tagValue, setTagValue] = useState('')
   const deviceSort = useDash((s) => s.deviceSort)
   const setDeviceSort = useDash((s) => s.setDeviceSort)
   const pinnedDevices = useDash((s) => s.pinnedDevices)
@@ -840,6 +881,49 @@ export default function Devices() {
     setTagFilter(null)
   }
 
+  // ── bulk selection ──────────────────────────────────────────────
+  const toggleSelectMode = () => {
+    setSelectMode((v) => {
+      if (v) setSelectedIds([])
+      return !v
+    })
+  }
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]))
+  }
+  const allFilteredSelected = filtered.length > 0 && filtered.every((d) => selectedIds.includes(d.id))
+  const selectAllFiltered = () => {
+    setSelectedIds((prev) =>
+      allFilteredSelected
+        ? prev.filter((id) => !filtered.some((d) => d.id === id))
+        : [...new Set([...prev, ...filtered.map((d) => d.id)])],
+    )
+  }
+
+  async function runBulk(action: 'maintenance' | 'addTag' | 'removeTag', value: boolean | string) {
+    if (selectedIds.length === 0) return
+    setBulkBusy(true)
+    try {
+      const res = await api<{ updated: number; detail: string }>('/api/devices/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ ids: selectedIds, action, value }),
+      })
+      const label =
+        action === 'maintenance'
+          ? `Maintenance ${value === true ? 'opened' : 'closed'} on ${res.updated} device${res.updated === 1 ? '' : 's'}`
+          : `Tag "${String(value)}" ${action === 'addTag' ? 'added to' : 'removed from'} ${res.updated} device${res.updated === 1 ? '' : 's'}`
+      toast.success(label, { description: res.detail })
+      qc.invalidateQueries({ queryKey: ['devices'] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
+      setTagDialogOpen(false)
+      setTagValue('')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Bulk action failed')
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <SectionHeader
@@ -861,6 +945,17 @@ export default function Devices() {
               {offlineCount} offline
             </Badge>
             <Badge variant="secondary">{deviceList.length} total</Badge>
+            <Button
+              variant={selectMode ? 'default' : 'ghost'}
+              size="sm"
+              className={cn('h-11 gap-2 md:h-9', !selectMode && 'glass-inset')}
+              aria-pressed={selectMode}
+              disabled={deviceList.length === 0}
+              onClick={toggleSelectMode}
+            >
+              <ListChecks className="h-4 w-4" aria-hidden />
+              {selectMode ? 'Cancel' : 'Bulk edit'}
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -1079,13 +1174,132 @@ export default function Devices() {
               {deviceList.length} devices
             </p>
           ) : null}
+          {selectMode ? (
+            <div className="glass-inset flex flex-wrap items-center gap-2 rounded-xl px-3 py-2">
+              <button
+                type="button"
+                aria-pressed={allFilteredSelected}
+                onClick={selectAllFiltered}
+                className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-primary/10 hover:text-foreground"
+              >
+                <SquareCheckBig
+                  className={cn('size-3.5', allFilteredSelected && 'text-primary')}
+                  aria-hidden
+                />
+                {allFilteredSelected ? 'Deselect shown' : 'Select all shown'}
+              </button>
+              <span className="text-xs text-muted-foreground">
+                pick machines for the bulk actions below
+              </span>
+              <span className="ml-auto font-mono text-xs tabular-nums text-muted-foreground">
+                {selectedIds.length} selected
+              </span>
+            </div>
+          ) : null}
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {sorted.map((d) => (
-              <DeviceCard key={d.id} device={d} />
+            {sorted.map((d, i) => (
+              <DeviceCard
+                key={d.id}
+                device={d}
+                index={i}
+                selectMode={selectMode}
+                selected={selectedIds.includes(d.id)}
+                onToggleSelect={toggleSelect}
+              />
             ))}
           </div>
         </>
       )}
+
+      {/* floating bulk-action dock */}
+      {selectMode ? (
+        <div
+          className="glass-overlay fixed bottom-5 left-1/2 z-50 flex w-max max-w-[calc(100vw-2.5rem)] flex-wrap items-center justify-center gap-2 rounded-2xl border-border/60 px-4 py-3 shadow-2xl shadow-black/20"
+          style={{ animation: 'dock-in 260ms cubic-bezier(0.22,1,0.36,1) both' }}
+          role="toolbar"
+          aria-label="Bulk device actions"
+        >
+          <span className="mr-1 flex items-center gap-1.5 text-xs font-semibold">
+            <span className="flex size-5 items-center justify-center rounded-full bg-primary font-mono text-[10px] text-primary-foreground">
+              {selectedIds.length}
+            </span>
+            selected
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5"
+            disabled={selectedIds.length === 0 || bulkBusy}
+            onClick={() => void runBulk('maintenance', true)}
+          >
+            <Wrench className="size-3.5 text-amber-500" aria-hidden /> Open maint
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5"
+            disabled={selectedIds.length === 0 || bulkBusy}
+            onClick={() => void runBulk('maintenance', false)}
+          >
+            <Wrench className="size-3.5" aria-hidden /> Close maint
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5"
+            disabled={selectedIds.length === 0 || bulkBusy}
+            onClick={() => {
+              setTagValue('')
+              setTagDialogOpen(true)
+            }}
+          >
+            <Tag className="size-3.5 text-teal-500" aria-hidden /> Add tag
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-8 gap-1.5 text-muted-foreground"
+            disabled={selectedIds.length === 0 || bulkBusy}
+            onClick={() => setSelectedIds([])}
+          >
+            <X className="size-3.5" aria-hidden /> Clear
+          </Button>
+        </div>
+      ) : null}
+
+      {/* bulk tag dialog */}
+      <Dialog open={tagDialogOpen} onOpenChange={setTagDialogOpen}>
+        <DialogContent className="glass-strong rounded-2xl sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Tag className="size-4 text-teal-500" aria-hidden /> Tag {selectedIds.length} device{selectedIds.length === 1 ? '' : 's'}
+            </DialogTitle>
+            <DialogDescription>
+              Adds a new tag to every selected machine (existing tags are kept).
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            value={tagValue}
+            onChange={(e) => setTagValue(e.target.value)}
+            placeholder="e.g. q4-audit"
+            maxLength={40}
+            aria-label="Tag name"
+          />
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => setTagDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={tagValue.trim() === '' || bulkBusy}
+              onClick={() => void runBulk('addTag', tagValue.trim())}
+            >
+              {bulkBusy ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
+              Add tag
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -22,6 +22,7 @@ import { api, type AppSettings } from '@/lib/types'
 import { useDash } from '@/lib/store'
 import { cn } from '@/lib/utils'
 import { ErrorBlock, LoadingBlock, Panel, SectionHeader } from '../shared'
+import AlertRulesSettings from './alert-rules-settings'
 import SavedCommands from './saved-commands'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -482,7 +483,17 @@ export default function SettingsView() {
           <PresenceSoundRow />
         </SectionCard>
 
-        {/* 3-b. Agent enrollment — wide */}
+        {/* 3-b. Alert rules engine — wide */}
+        <div className="lg:col-span-2">
+          <AlertRulesSettings
+            engineEnabled={form.alertRulesEnabled}
+            onToggleEngine={async (v) => {
+              await saveSection('alert-rules-engine', { alertRulesEnabled: v })
+            }}
+          />
+        </div>
+
+        {/* 3-c. Agent enrollment — wide */}
         <div className="lg:col-span-2">
           {form ? (
             <AgentEnrollment hubUrl={form.hubUrl} heartbeatSec={form.heartbeatIntervalSec} />
@@ -562,7 +573,7 @@ export default function SettingsView() {
             </div>
             <div className="min-w-0 flex-1">
               <h3 className="font-semibold leading-tight">
-                About <span className="text-gradient">SentraRMM v0.1.6</span>
+                About <span className="text-gradient">SentraRMM v0.1.7</span>
               </h3>
               <p className="mt-1 text-sm text-muted-foreground">
                 Open-source, authorized-use RMM for your own fleet and security assessments.

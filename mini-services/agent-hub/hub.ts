@@ -15,7 +15,7 @@ import type { AgentInfo, DeviceMetrics } from "../../src/lib/types";
 import { CONFIG, nextApi } from "./config";
 import { SIM_DEVICE_DEFS } from "./sim/devices";
 import { SimAgent } from "./sim/agent";
-import { nowIso, postJson } from "./util";
+import { nowIso, postJson, postJsonBody } from "./util";
 
 interface LocationHint {
   lat: number;
@@ -210,11 +210,7 @@ export class Hub {
       const rec = this.agents.get(msg.agentId);
       if (rec) rec.lastSeen = nowIso();
       this.io.to("dashboard").emit("metrics:update", { metrics: msg.metrics });
-      void postJson(
-        nextApi("/api/internal/heartbeat"),
-        { agentId: msg.agentId, metrics: msg.metrics, status: "online", location: msg.location ?? null },
-        HUB_HEADERS,
-      );
+      void this.pushHeartbeat(msg.agentId, msg);
       // Registration POST failed earlier → retry on every heartbeat.
       if (rec && this.pendingRegister.has(msg.agentId)) void this.pushRegister(rec.info);
     });
@@ -270,6 +266,32 @@ export class Hub {
     const ok = await postJson(nextApi("/api/internal/devices/register"), { ...info }, HUB_HEADERS);
     if (ok) this.pendingRegister.delete(info.agentId);
     else this.pendingRegister.add(info.agentId);
+  }
+
+  /**
+   * Relay an agent heartbeat to the internal API and surface any alerts the
+   * threshold rules engine fired for this telemetry as realtime `alert:new`
+   * events (so they toast + sound in the dashboard like every other alert).
+   */
+  private async pushHeartbeat(agentId: string, msg: HeartbeatMsg): Promise<void> {
+    const body = await postJsonBody(
+      nextApi("/api/internal/heartbeat"),
+      { agentId, metrics: msg.metrics, status: "online", location: msg.location ?? null },
+      HUB_HEADERS,
+    );
+    if (!body) return;
+    const envelope = body.data && typeof body.data === "object" ? (body.data as Record<string, unknown>) : body;
+    const fired = envelope.fired;
+    if (Array.isArray(fired)) {
+      for (const alert of fired) {
+        if (alert && typeof alert === "object") {
+          this.io.to("dashboard").emit("alert:new", { alert });
+        }
+      }
+      if (fired.length > 0) {
+        console.log(`[HUB] rule engine fired ${fired.length} alert(s) for ${agentId}`);
+      }
+    }
   }
 
   // ── dispatch ──────────────────────────────────────────────────────────

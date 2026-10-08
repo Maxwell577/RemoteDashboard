@@ -1,0 +1,629 @@
+   464→   464→              {shot
+   465→   465→                ? `Captured ${timeAgo(shot.createdAt)} · ${shot.format ?? 'image'} · ${fmtBytes(shot.sizeBytes)}`
+   466→   466→                : ''}
+   467→   467→            </DialogDescription>
+   468→   468→          </DialogHeader>
+   469→   469→          {shot?.dataRef ? (
+   470→   470→            <>
+   471→   471→              <div className="glass-inset overflow-hidden rounded-xl">
+   472→   472→                <img
+   473→   473→                  src={shot.dataRef}
+   474→   474→                  alt={`Screenshot of ${device.hostname}`}
+   475→   475→                  className="max-h-[60vh] w-full object-contain"
+   476→   476→                />
+   477→   477→              </div>
+   478→   478→              <div className="flex justify-end">
+   479→   479→                <a
+   480→   480→                  href={shot.dataRef}
+   481→   481→                  download={`${device.hostname}-${shot.id}.${shot.format ?? 'svg'}`}
+   482→   482→                  className={buttonVariants({ variant: 'outline', size: 'sm' })}
+   483→   483→                >
+   484→   484→                  <Download className="size-3.5" aria-hidden /> Download
+   485→   485→                </a>
+   486→   486→              </div>
+   487→   487→            </>
+   488→   488→          ) : (
+   489→   489→            <p className="text-sm text-muted-foreground">No preview data available.</p>
+   490→   490→          )}
+   491→   491→        </DialogContent>
+   492→   492→      </Dialog>
+   493→   493→    </div>
+   494→   494→  )
+   495→   495→}
+   496→   496→
+   497→   497→function DeviceDetailsDialog({
+   498→   498→  device,
+   499→   499→  open,
+   500→   500→  onOpenChange,
+   501→   501→}: {
+   502→   502→  device: Device
+   503→   503→  open: boolean
+   504→   504→  onOpenChange: (o: boolean) => void
+   505→   505→}) {
+   506→   506→  return (
+   507→   507→    <Dialog open={open} onOpenChange={onOpenChange}>
+   508→   508→      <DialogContent className="glass scroll-slim max-h-[85vh] overflow-y-auto rounded-2xl sm:max-w-2xl">
+   509→   509→        <DialogHeader>
+   510→   510→          <DialogTitle className="flex items-center gap-2 text-base">
+   511→   511→            <StatusDot online={device.status === 'online'} />
+   512→   512→            {device.hostname}
+   513→   513→          </DialogTitle>
+   514→   514→          <DialogDescription>
+   515→   515→            {device.friendlyName ?? device.osName} · {device.deviceType} ·{' '}
+   516→   516→            {device.status === 'online' ? 'online' : `last seen ${timeAgo(device.lastSeen)}`}
+   517→   517→          </DialogDescription>
+   518→   518→        </DialogHeader>
+   519→   519→        <DeviceDetailsBody
+   520→   520→          key={device.id}
+   521→   521→          device={device}
+   522→   522→          close={() => onOpenChange(false)}
+   523→   523→        />
+   524→   524→      </DialogContent>
+   525→   525→    </Dialog>
+   526→   526→  )
+   527→   527→}
+   528→   528→
+   529→   529→// ─────────────────────────── device card ────────────────────────────
+   530→   530→
+   531→   531→function DeviceCard({ device }: { device: Device }) {
+   532→   532→  const setView = useDash((s) => s.setView)
+   533→   533→  const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
+   534→   534→  const metricsByDevice = useDash((s) => s.metricsByDevice)
+   535→   535→  const pinned = useDash((s) => s.pinnedDevices.includes(device.id))
+   536→   536→  const togglePinned = useDash((s) => s.togglePinnedDevice)
+   537→   537→  const [detailsOpen, setDetailsOpen] = useState(false)
+   538→   538→
+   539→   539→  const TypeIcon = TYPE_ICON[device.deviceType]
+   540→   540→  const online = device.status === 'online'
+   541→   541→  const m = online ? metricsByDevice[device.id] : undefined
+   542→   542→  const health = computeHealthScore({
+   543→   543→    online,
+   544→   544→    cpuPercent: m?.cpuPercent,
+   545→   545→    memoryPercent: m?.memoryPercent,
+   546→   546→    diskPercent: m?.diskPercent,
+   547→   547→    stale: online && !m,
+   548→   548→  })
+   549→   549→
+   550→   550→  const go = (v: ViewId) => {
+   551→   551→    setSelectedDeviceId(device.id)
+   552→   552→    setView(v)
+   553→   553→  }
+   554→   554→
+   555→   555→  return (
+   556→   556→    <>
+   557→   557→      <Panel
+   558→   558→        className={cn(
+   559→   559→          'glass-hover flex flex-col p-4',
+   560→   560→          !online && 'opacity-80',
+   561→   561→          pinned && 'ring-1 ring-primary/30',
+   562→   562→        )}
+   563→   563→      >
+   564→   564→        <div className="flex items-start gap-2.5">
+   565→   565→          <span className="mt-1.5">
+   566→   566→            <StatusDot online={online} />
+   567→   567→          </span>
+   568→   568→          <div className="min-w-0 flex-1">
+   569→   569→            {/* hostname gets the full row so it never over-truncates */}
+   570→   570→            <div className="flex min-w-0 items-center gap-1.5">
+   571→   571→              {device.maintenance ? (
+   572→   572→                <span
+   573→   573→                  className="flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-px text-[10px] font-semibold text-amber-600 dark:text-amber-400"
+   574→   574→                  title="Maintenance window open — alerts suppressed"
+   575→   575→                >
+   576→   576→                  <Wrench className="size-3" aria-hidden />
+   577→   577→                  maint
+   578→   578→                </span>
+   579→   579→              ) : null}
+   580→   580→              <h3
+   581→   581→                className="min-w-0 truncate font-semibold leading-tight"
+   582→   582→                title={device.hostname}
+   583→   583→              >
+   584→   584→                {device.hostname}
+   585→   585→              </h3>
+   586→   586→              <TypeIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+   587→   587→              <button
+   588→   588→                type="button"
+   589→   589→                aria-label={pinned ? `Unpin ${device.hostname}` : `Pin ${device.hostname}`}
+   590→   590→                aria-pressed={pinned}
+   591→   591→                title={pinned ? 'Unpin device' : 'Pin to top'}
+   592→   592→                onClick={() => togglePinned(device.id)}
+   593→   593→                className="ml-auto shrink-0 rounded-md p-1 text-muted-foreground/50 outline-none transition-all hover:bg-primary/10 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring/50"
+   594→   594→              >
+   595→   595→                <Star
+   596→   596→                  className={cn(
+   597→   597→                    'size-4 transition-colors',
+   598→   598→                    pinned && 'fill-primary text-primary',
+   599→   599→                  )}
+   600→   600→                  aria-hidden
+   601→   601→                />
+   602→   602→              </button>
+   603→   603→            </div>
+   604→   604→            <div className="mt-0.5 flex items-center gap-1.5">
+   605→   605→              <p
+   606→   606→                className="min-w-0 truncate text-xs text-muted-foreground"
+   607→   607→                title={device.friendlyName ?? undefined}
+   608→   608→              >
+   609→   609→                {device.friendlyName ?? 'No friendly name'}
+   610→   610→              </p>
+   611→   611→              <Badge
+   612→   612→                variant="outline"
+   613→   613→                className="ml-auto max-w-[150px] shrink-0 truncate border-border/60 bg-background/40 text-[10px]"
+   614→   614→                title={device.osName}
+   615→   615→              >
+   616→   616→                {device.osName}
+   617→   617→              </Badge>
+   618→   618→            </div>
+   619→   619→          </div>
+   620→   620→        </div>
+   621→   621→
+   622→   622→        <dl className="mt-3 flex flex-col gap-1 text-xs">
+   623→   623→          <div className="flex items-center justify-between gap-2">
+   624→   624→            <dt className="flex items-center gap-1.5 text-muted-foreground">
+   625→   625→              Health
+   626→   626→              <span
+   627→   627→                className={cn(
+   628→   628→                  'rounded-full border px-1.5 py-px font-mono text-[10px] font-semibold',
+   629→   629→                  healthTone(health),
+   630→   630→                )}
+   631→   631→              >
+   632→   632→                {health}
+   633→   633→              </span>
+   634→   634→            </dt>
+   635→   635→            <dd className="min-w-0 truncate text-right font-medium">{online ? 'live' : 'offline'}</dd>
+   636→   636→          </div>
+   637→   637→          <div className="flex items-baseline justify-between gap-3">
+   638→   638→            <dt className="shrink-0 text-muted-foreground">CPU</dt>
+   639→   639→            <dd className="min-w-0 truncate text-right font-medium">{device.cpuModel ?? '—'}</dd>
+   640→   640→          </div>
+   641→   641→          <div className="flex items-baseline justify-between gap-3">
+   642→   642→            <dt className="shrink-0 text-muted-foreground">RAM</dt>
+   643→   643→            <dd className="text-right font-medium">{ramLabel(device.totalMemoryMB)}</dd>
+   644→   644→          </div>
+   645→   645→          <div className="flex items-baseline justify-between gap-3">
+   646→   646→            <dt className="shrink-0 text-muted-foreground">IP</dt>
+   647→   647→            <dd className="font-mono text-right font-medium">
+   648→   648→              {device.ipAddress ?? device.localIp ?? '—'}
+   649→   649→            </dd>
+   650→   650→          </div>
+   651→   651→          <div className="flex items-baseline justify-between gap-3">
+   652→   652→            <dt className="shrink-0 text-muted-foreground">{online ? 'Status' : 'Last seen'}</dt>
+   653→   653→            <dd
+   654→   654→              className={cn(
+   655→   655→                'truncate text-right font-medium',
+   656→   656→                online && !m && 'text-muted-foreground',
+   657→   657→                online && m && 'text-emerald-600 dark:text-emerald-400',
+   658→   658→              )}
+   659→   659→            >
+   660→   660→              {online
+   661→   661→                ? m
+   662→   662→                  ? `live · CPU ${Math.round(m.cpuPercent)}% · MEM ${Math.round(m.memoryPercent)}%`
+   663→   663→                  : 'waiting for telemetry…'
+   664→   664→                : timeAgo(device.lastSeen)}
+   665→   665→            </dd>
+   666→   666→          </div>
+   667→   667→          {online && m ? (
+   668→   668→            <div className="flex items-baseline justify-between gap-3">
+   669→   669→              <dt className="flex shrink-0 items-center gap-1 text-muted-foreground">
+   670→   670→                <Timer className="size-3" aria-hidden />
+   671→   671→                Uptime
+   672→   672→              </dt>
+   673→   673→              <dd
+   674→   674→                className="truncate text-right font-medium tabular-nums"
+   675→   675→                title={`Last boot ${new Date(Date.now() - m.uptimeSec * 1000).toLocaleString()}`}
+   676→   676→              >
+   677→   677→                {fmtUptime(m.uptimeSec)}
+   678→   678→              </dd>
+   679→   679→            </div>
+   680→   680→          ) : null}
+   681→   681→        </dl>
+   682→   682→
+   683→   683→        {device.tags.length > 0 ? (
+   684→   684→          <div className="mt-3 flex flex-wrap gap-1">
+   685→   685→            {device.tags.map((t) => (
+   686→   686→              <Badge key={t} variant="secondary" className="text-[10px]">
+   687→   687→                {t}
+   688→   688→              </Badge>
+   689→   689→            ))}
+   690→   690→          </div>
+   691→   691→        ) : null}
+   692→   692→
+   693→   693→        <div className="mt-4 flex items-center gap-2 border-t border-border/50 pt-3">
+   694→   694→          <Button size="sm" className="flex-1" onClick={() => go('terminal')}>
+   695→   695→            <SquareTerminal className="size-3.5" aria-hidden /> Manage
+   696→   696→          </Button>
+   697→   697→          <Button
+   698→   698→            size="sm"
+   699→   699→            variant="outline"
+   700→   700→            className="flex-1"
+   701→   701→            onClick={() => setDetailsOpen(true)}
+   702→   702→          >
+   703→   703→            <Info className="size-3.5" aria-hidden /> Details
+   704→   704→          </Button>
+   705→   705→          <Button size="sm" variant="outline" className="flex-1" onClick={() => go('location')}>
+   706→   706→            <MapPin className="size-3.5" aria-hidden /> Locate
+   707→   707→          </Button>
+   708→   708→        </div>
+   709→   709→      </Panel>
+   710→   710→
+   711→   711→      <DeviceDetailsDialog
+   712→   712→        device={device}
+   713→   713→        open={detailsOpen}
+   714→   714→        onOpenChange={setDetailsOpen}
+   715→   715→      />
+   716→   716→    </>
+   717→   717→  )
+   718→   718→}
+   719→   719→
+   720→   720→// ──────────────────────────── devices view ──────────────────────────
+   721→   721→
+   722→   722→type StatusFilter = 'all' | 'online' | 'offline' | 'maintenance'
+   723→   723→
+   724→   724→const SORT_LABELS: Record<DeviceSort, string> = {
+   725→   725→  hostname: 'Hostname A–Z',
+   726→   726→  health: 'Health score',
+   727→   727→  lastSeen: 'Last seen',
+   728→   728→  cpu: 'CPU live',
+   729→   729→}
+   730→   730→
+   731→   731→function StatusFilterPill({
+   732→   732→  active,
+   733→   733→  label,
+   734→   734→  count,
+   735→   735→  onClick,
+   736→   736→}: {
+   737→   737→  active: boolean
+   738→   738→  label: string
+   739→   739→  count: number
+   740→   740→  onClick: () => void
+   741→   741→}) {
+   742→   742→  return (
+   743→   743→    <button
+   744→   744→      type="button"
+   745→   745→      onClick={onClick}
+   746→   746→      aria-pressed={active}
+   747→   747→      className={cn(
+   748→   748→        'glass-inset inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-all',
+   749→   749→        active
+   750→   750→          ? 'border border-primary/30 bg-primary/15 text-primary shadow-inner'
+   751→   751→          : 'text-muted-foreground hover:bg-primary/10 hover:text-foreground',
+   752→   752→      )}
+   753→   753→    >
+   754→   754→      {label}
+   755→   755→      <span className="font-mono tabular-nums opacity-70">{count}</span>
+   756→   756→    </button>
+   757→   757→  )
+   758→   758→}
+   759→   759→
+   760→   760→export default function Devices() {
+   761→   761→  const { data: devices, isLoading, error } = useDevices()
+   762→   762→
+   763→   763→  const [search, setSearch] = useState('')
+   764→   764→  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+   765→   765→  const [tagFilter, setTagFilter] = useState<string | null>(null)
+   766→   766→  const deviceSort = useDash((s) => s.deviceSort)
+   767→   767→  const setDeviceSort = useDash((s) => s.setDeviceSort)
+   768→   768→  const pinnedDevices = useDash((s) => s.pinnedDevices)
+   769→   769→  const metricsByDevice = useDash((s) => s.metricsByDevice)
+   770→   770→
+   771→   771→  const deviceList = devices ?? []
+   772→   772→  const onlineCount = deviceList.filter((d) => d.status === 'online').length
+   773→   773→  const offlineCount = deviceList.length - onlineCount
+   774→   774→  const maintenanceCount = deviceList.filter((d) => d.maintenance).length
+   775→   775→
+   776→   776→  // every distinct tag in the fleet, alphabetical
+   777→   777→  const allTags = useMemo(() => {
+   778→   778→    const s = new Set<string>()
+   779→   779→    for (const d of deviceList) for (const t of d.tags) s.add(t)
+   780→   780→    return [...s].sort((a, b) => a.localeCompare(b))
+   781→   781→  }, [deviceList])
+   782→   782→
+   783→   783→  const filtered = useMemo(() => {
+   784→   784→    const q = search.trim().toLowerCase()
+   785→   785→    return deviceList.filter((d) => {
+   786→   786→      if (statusFilter === 'online' && d.status !== 'online') return false
+   787→   787→      if (statusFilter === 'offline' && d.status !== 'offline') return false
+   788→   788→      if (statusFilter === 'maintenance' && !d.maintenance) return false
+   789→   789→      if (tagFilter && !d.tags.includes(tagFilter)) return false
+   790→   790→      if (!q) return true
+   791→   791→      return (
+   792→   792→        d.hostname.toLowerCase().includes(q) ||
+   793→   793→        (d.friendlyName ?? '').toLowerCase().includes(q) ||
+   794→   794→        d.osName.toLowerCase().includes(q) ||
+   795→   795→        d.cpuModel?.toLowerCase().includes(q) ||
+   796→   796→        d.ipAddress?.toLowerCase().includes(q) ||
+   797→   797→        d.localIp?.toLowerCase().includes(q) ||
+   798→   798→        d.tags.some((t) => t.toLowerCase().includes(q))
+   799→   799→      )
+   800→   800→    })
+   801→   801→  }, [deviceList, search, statusFilter, tagFilter])
+   802→   802→
+   803→   803→  // pinned devices always float to the top, then the chosen sort key
+   804→   804→  const sorted = useMemo(() => {
+   805→   805→    const healthOf = (d: Device) =>
+   806→   806→      computeHealthScore({
+   807→   807→        online: d.status === 'online',
+   808→   808→        cpuPercent: metricsByDevice[d.id]?.cpuPercent,
+   809→   809→        memoryPercent: metricsByDevice[d.id]?.memoryPercent,
+   810→   810→        diskPercent: metricsByDevice[d.id]?.diskPercent,
+   811→   811→        stale: d.status === 'online' && !metricsByDevice[d.id],
+   812→   812→      })
+   813→   813→    const byKey = (a: Device, b: Device): number => {
+   814→   814→      switch (deviceSort) {
+   815→   815→        case 'health':
+   816→   816→          return healthOf(b) - healthOf(a)
+   817→   817→        case 'lastSeen': {
+   818→   818→          const ta = new Date(a.lastSeen ?? a.firstSeen).getTime()
+   819→   819→          const tb = new Date(b.lastSeen ?? b.firstSeen).getTime()
+   820→   820→          return tb - ta
+   821→   821→        }
+   822→   822→        case 'cpu':
+   823→   823→          return (metricsByDevice[b.id]?.cpuPercent ?? -1) - (metricsByDevice[a.id]?.cpuPercent ?? -1)
+   824→   824→        case 'hostname':
+   825→   825→        default:
+   826→   826→          return a.hostname.localeCompare(b.hostname)
+   827→   827→      }
+   828→   828→    }
+   829→   829→    return [...filtered].sort((a, b) => {
+   830→   830→      const pa = pinnedDevices.includes(a.id) ? 0 : 1
+   831→   831→      const pb = pinnedDevices.includes(b.id) ? 0 : 1
+   832→   832→      return pa !== pb ? pa - pb : byKey(a, b)
+   833→   833→    })
+   834→   834→  }, [filtered, deviceSort, pinnedDevices, metricsByDevice])
+   835→   835→
+   836→   836→  const filtersActive = search.trim() !== '' || statusFilter !== 'all' || tagFilter !== null
+   837→   837→  const clearFilters = () => {
+   838→   838→    setSearch('')
+   839→   839→    setStatusFilter('all')
+   840→   840→    setTagFilter(null)
+   841→   841→  }
+   842→   842→
+   843→   843→  return (
+   844→   844→    <div className="flex flex-col gap-6">
+   845→   845→      <SectionHeader
+   846→   846→        title="Devices"
+   847→   847→        subtitle="All enrolled machines — online and offline"
+   848→   848→        icon={<MonitorSmartphone className="h-5 w-5" />}
+   849→   849→        actions={
+   850→   850→          <>
+   851→   851→            <Badge
+   852→   852→              variant="outline"
+   853→   853→              className="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+   854→   854→            >
+   855→   855→              {onlineCount} online
+   856→   856→            </Badge>
+   857→   857→            <Badge
+   858→   858→              variant="outline"
+   859→   859→              className="border-zinc-400/40 text-zinc-600 dark:text-zinc-400"
+   860→   860→            >
+   861→   861→              {offlineCount} offline
+   862→   862→            </Badge>
+   863→   863→            <Badge variant="secondary">{deviceList.length} total</Badge>
+   864→   864→            <Button
+   865→   865→              variant="ghost"
+   866→   866→              size="sm"
+   867→   867→              className="glass-inset h-11 gap-2 md:h-9"
+   868→   868→              disabled={deviceList.length === 0}
+   869→   869→              onClick={() => {
+   870→   870→                const headers = [
+   871→   871→                  'hostname',
+   872→   872→                  'friendlyName',
+   873→   873→                  'osName',
+   874→   874→                  'osVersion',
+   875→   875→                  'osArch',
+   876→   876→                  'deviceType',
+   877→   877→                  'status',
+   878→   878→                  'cpuModel',
+   879→   879→                  'cpuCores',
+   880→   880→                  'totalMemoryMB',
+   881→   881→                  'localIp',
+   882→   882→                  'ipAddress',
+   883→   883→                  'macAddress',
+   884→   884→                  'agentVersion',
+   885→   885→                  'lastSeen',
+   886→   886→                  'locationLabel',
+   887→   887→                ]
+   888→   888→                const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+   889→   889→                const rows = deviceList.map((d) =>
+   890→   890→                  [
+   891→   891→                    d.hostname,
+   892→   892→                    d.friendlyName,
+   893→   893→                    d.osName,
+   894→   894→                    d.osVersion,
+   895→   895→                    d.osArch,
+   896→   896→                    d.deviceType,
+   897→   897→                    d.status,
+   898→   898→                    d.cpuModel,
+   899→   899→                    d.cpuCores,
+   900→   900→                    d.totalMemoryMB,
+   901→   901→                    d.localIp,
+   902→   902→                    d.ipAddress,
+   903→   903→                    d.macAddress,
+   904→   904→                    d.agentVersion,
+   905→   905→                    d.lastSeen,
+   906→   906→                    d.locationLabel,
+   907→   907→                  ]
+   908→   908→                    .map(esc)
+   909→   909→                    .join(',')
+   910→   910→                )
+   911→   911→                const csv = [headers.map(esc).join(','), ...rows].join('\n')
+   912→   912→                const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+   913→   913→                const a = document.createElement('a')
+   914→   914→                a.href = url
+   915→   915→                a.download = 'sentrarmm-device-inventory.csv'
+   916→   916→                a.click()
+   917→   917→                URL.revokeObjectURL(url)
+   918→   918→                toast.success(`Exported ${deviceList.length} devices to CSV`)
+   919→   919→              }}
+   920→   920→            >
+   921→   921→              <Download className="h-4 w-4" />
+   922→   922→              Export CSV
+   923→   923→            </Button>
+   924→   924→          </>
+   925→   925→        }
+   926→   926→      />
+   927→   927→
+   928→   928→      {/* Filter toolbar — search / status / tags */}
+   929→   929→      {!isLoading && !error && deviceList.length > 0 ? (
+   930→   930→        <Panel className="card-sheen relative overflow-hidden p-3">
+   931→   931→          <div
+   932→   932→            aria-hidden
+   933→   933→            className="pointer-events-none absolute -left-10 -top-10 h-28 w-28 rounded-full bg-primary/5 blur-2xl"
+   934→   934→          />
+   935→   935→          <div className="flex flex-col gap-3">
+   936→   936→            <div className="flex flex-wrap items-center gap-2">
+   937→   937→              {/* search */}
+   938→   938→              <div className="relative w-full sm:w-auto sm:min-w-0 sm:max-w-xs sm:flex-1">
+   939→   939→                <Search
+   940→   940→                  className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+   941→   941→                  aria-hidden
+   942→   942→                />
+   943→   943→                <Input
+   944→   944→                  value={search}
+   945→   945→                  onChange={(e) => setSearch(e.target.value)}
+   946→   946→                  placeholder="Search hostname, OS, IP, tag…"
+   947→   947→                  className="h-9 pl-8"
+   948→   948→                  aria-label="Search devices"
+   949→   949→                />
+   950→   950→              </div>
+   951→   951→              {/* status pills */}
+   952→   952→              <div
+   953→   953→                className="flex items-center gap-1.5"
+   954→   954→                role="group"
+   955→   955→                aria-label="Filter by status"
+   956→   956→              >
+   957→   957→                <StatusFilterPill
+   958→   958→                  active={statusFilter === 'all'}
+   959→   959→                  label="All"
+   960→   960→                  count={deviceList.length}
+   961→   961→                  onClick={() => setStatusFilter('all')}
+   962→   962→                />
+   963→   963→                <StatusFilterPill
+   964→   964→                  active={statusFilter === 'online'}
+   965→   965→                  label="Online"
+   966→   966→                  count={onlineCount}
+   967→   967→                  onClick={() => setStatusFilter('online')}
+   968→   968→                />
+   969→   969→                <StatusFilterPill
+   970→   970→                  active={statusFilter === 'offline'}
+   971→   971→                  label="Offline"
+   972→   972→                  count={offlineCount}
+   973→   973→                  onClick={() => setStatusFilter('offline')}
+   974→   974→                />
+   975→   975→                <StatusFilterPill
+   976→   976→                  active={statusFilter === 'maintenance'}
+   977→   977→                  label="Maint"
+   978→   978→                  count={maintenanceCount}
+   979→   979→                  onClick={() => setStatusFilter('maintenance')}
+   980→   980→                />
+   981→   981→              </div>
+   982→   982→              {/* sort control */}
+   983→   983→              <div className="flex items-center gap-1.5">
+   984→   984→                <ArrowDownWideNarrow
+   985→   985→                  className="size-3.5 shrink-0 text-muted-foreground"
+   986→   986→                  aria-hidden
+   987→   987→                />
+   988→   988→                <Select value={deviceSort} onValueChange={(v) => setDeviceSort(v as DeviceSort)}>
+   989→   989→                  <SelectTrigger
+   990→   990→                    className="glass-inset h-9 w-[132px] justify-between text-xs sm:w-[150px]"
+   991→   991→                    aria-label="Sort devices"
+   992→   992→                  >
+   993→   993→                    <SelectValue />
+   994→   994→                  </SelectTrigger>
+   995→   995→                  <SelectContent className="glass-strong">
+   996→   996→                    {(Object.keys(SORT_LABELS) as DeviceSort[]).map((k) => (
+   997→   997→                      <SelectItem key={k} value={k} className="text-xs">
+   998→   998→                        {SORT_LABELS[k]}
+   999→   999→                      </SelectItem>
+  1000→  1000→                    ))}
+  1001→  1001→                  </SelectContent>
+  1002→  1002→                </Select>
+  1003→  1003→              </div>
+  1004→  1004→              {filtersActive ? (
+  1005→  1005→                <Button
+  1006→  1006→                  variant="ghost"
+  1007→  1007→                  size="sm"
+  1008→  1008→                  className="ml-auto h-9 gap-1.5 text-muted-foreground"
+  1009→  1009→                  onClick={clearFilters}
+  1010→  1010→                >
+  1011→  1011→                  <X className="size-3.5" aria-hidden />
+  1012→  1012→                  Clear
+  1013→  1013→                </Button>
+  1014→  1014→              ) : null}
+  1015→  1015→            </div>
+  1016→  1016→            {allTags.length > 0 ? (
+  1017→  1017→              <div className="flex flex-wrap items-center gap-1.5">
+  1018→  1018→                <Tag
+  1019→  1019→                  className="mr-0.5 size-3.5 text-muted-foreground"
+  1020→  1020→                  aria-hidden
+  1021→  1021→                />
+  1022→  1022→                {allTags.map((t) => {
+  1023→  1023→                  const active = tagFilter === t
+  1024→  1024→                  return (
+  1025→  1025→                    <button
+  1026→  1026→                      key={t}
+  1027→  1027→                      type="button"
+  1028→  1028→                      aria-pressed={active}
+  1029→  1029→                      onClick={() => setTagFilter(active ? null : t)}
+  1030→  1030→                      className={cn(
+  1031→  1031→                        'rounded-full border px-2.5 py-1 text-[11px] font-medium transition-all',
+  1032→  1032→                        active
+  1033→  1033→                          ? 'border-primary/40 bg-primary/15 text-primary shadow-inner'
+  1034→  1034→                          : 'border-border/60 bg-background/40 text-muted-foreground hover:border-primary/30 hover:bg-primary/10 hover:text-foreground',
+  1035→  1035→                      )}
+  1036→  1036→                    >
+  1037→  1037→                      {t}
+  1038→  1038→                    </button>
+  1039→  1039→                  )
+  1040→  1040→                })}
+  1041→  1041→              </div>
+  1042→  1042→            ) : null}
+  1043→  1043→          </div>
+  1044→  1044→        </Panel>
+  1045→  1045→      ) : null}
+  1046→  1046→
+  1047→  1047→      {isLoading ? (
+  1048→  1048→        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+  1049→  1049→          {Array.from({ length: 6 }).map((_, i) => (
+  1050→  1050→            <Skeleton key={i} className="h-48 rounded-2xl" />
+  1051→  1051→          ))}
+  1052→  1052→        </div>
+  1053→  1053→      ) : error ? (
+  1054→  1054→        <ErrorBlock
+  1055→  1055→          message={error instanceof Error ? error.message : 'Failed to load devices'}
+  1056→  1056→        />
+  1057→  1057→      ) : deviceList.length === 0 ? (
+  1058→  1058→        <EmptyState
+  1059→  1059→          icon={<MonitorSmartphone className="h-8 w-8" />}
+  1060→  1060→          title="No devices enrolled"
+  1061→  1061→          hint="Start an agent to register your first machine."
+  1062→  1062→        />
+  1063→  1063→      ) : filtered.length === 0 ? (
+  1064→  1064→        <EmptyState
+  1065→  1065→          icon={<Search className="h-8 w-8" />}
+  1066→  1066→          title="No devices match your filters"
+  1067→  1067→          hint={
+  1068→  1068→            filtersActive
+  1069→  1069→              ? 'Try a different search term, status or tag.'
+  1070→  1070→              : undefined
+  1071→  1071→          }
+  1072→  1072→        />
+  1073→  1073→      ) : (
+  1074→  1074→        <>
+  1075→  1075→          {filtersActive ? (
+  1076→  1076→            <p className="text-xs text-muted-foreground" aria-live="polite">
+  1077→  1077→              showing{' '}
+  1078→  1078→              <span className="font-semibold text-foreground">{filtered.length}</span> of{' '}
+  1079→  1079→              {deviceList.length} devices
+  1080→  1080→            </p>
+  1081→  1081→          ) : null}
+  1082→  1082→          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+  1083→  1083→            {sorted.map((d) => (
+  1084→  1084→              <DeviceCard key={d.id} device={d} />
+  1085→  1085→            ))}
+  1086→  1086→          </div>
+  1087→  1087→        </>
+  1088→  1088→      )}
+  1089→  1089→    </div>
+  1090→  1090→  )
+  1091→  1091→}
+  1092→  1092→

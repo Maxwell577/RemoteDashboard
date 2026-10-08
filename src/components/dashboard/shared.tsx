@@ -88,11 +88,13 @@ export function StatusDot({
 export function Panel({
   className,
   children,
+  style,
 }: {
   className?: string
   children: ReactNode
+  style?: React.CSSProperties
 }) {
-  return <div className={cn('glass rounded-2xl', className)}>{children}</div>
+  return <div className={cn('glass rounded-2xl', className)} style={style}>{children}</div>
 }
 
 export function SectionHeader({
@@ -121,7 +123,7 @@ export function SectionHeader({
           ) : null}
         </div>
       </div>
-      {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+      {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
     </div>
   )
 }
@@ -136,8 +138,12 @@ export function EmptyState({
   hint?: string
 }) {
   return (
-    <div className="glass-inset flex flex-col items-center justify-center gap-2 rounded-2xl px-6 py-10 text-center">
-      {icon ? <div className="text-muted-foreground">{icon}</div> : null}
+    <div className="glass-inset flex flex-col items-center justify-center gap-3 rounded-2xl px-6 py-10 text-center">
+      {icon ? (
+        <div className="empty-state-art" aria-hidden>
+          <div className="text-muted-foreground/80">{icon}</div>
+        </div>
+      ) : null}
       <p className="font-medium">{title}</p>
       {hint ? <p className="text-sm text-muted-foreground">{hint}</p> : null}
     </div>

@@ -325,6 +325,64 @@
   100% { background-position: 400px 0; }
 }
 
+/* entrance: rise + fade (staggered via inline animation-delay) */
+@keyframes animate-in-up {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* floating bulk-action dock slide-up */
+@keyframes dock-in {
+  from { opacity: 0; transform: translate(-50%, 16px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-in-up-anim,
+  [style*="animate-in-up"],
+  [style*="dock-in"] {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+  }
+}
+
+/* decorative orbit rings behind EmptyState icons */
+.empty-state-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 84px;
+  height: 84px;
+}
+.empty-state-art::before,
+.empty-state-art::after {
+  content: "";
+  position: absolute;
+  border-radius: 9999px;
+  border: 1px dashed oklch(0.55 0.08 170 / 35%);
+  animation: orbit-spin 26s linear infinite;
+}
+.empty-state-art::before {
+  inset: 0;
+}
+.empty-state-art::after {
+  inset: 14px;
+  border-color: oklch(0.55 0.1 190 / 28%);
+  animation-direction: reverse;
+  animation-duration: 18s;
+}
+
+@keyframes orbit-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .empty-state-art::before,
+  .empty-state-art::after {
+    animation: none;
+  }
+}
+
 .text-gradient {
   background: linear-gradient(100deg, oklch(0.5 0.12 168), oklch(0.6 0.12 190));
   -webkit-background-clip: text;
