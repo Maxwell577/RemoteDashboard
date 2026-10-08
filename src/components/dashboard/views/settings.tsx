@@ -562,7 +562,7 @@ export default function SettingsView() {
             </div>
             <div className="min-w-0 flex-1">
               <h3 className="font-semibold leading-tight">
-                About <span className="text-gradient">SentraRMM v0.1.5</span>
+                About <span className="text-gradient">SentraRMM v0.1.6</span>
               </h3>
               <p className="mt-1 text-sm text-muted-foreground">
                 Open-source, authorized-use RMM for your own fleet and security assessments.

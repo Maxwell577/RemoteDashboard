@@ -61,6 +61,9 @@ interface DashState {
   /** pinned device ids — always listed first in the Devices view (persisted) */
   pinnedDevices: string[]
   togglePinnedDevice: (id: string) => void
+  /** one-shot command handed to the Terminal (palette "run again") */
+  pendingCommand: { command: string; deviceId: string | null; nonce: number } | null
+  setPendingCommand: (c: { command: string; deviceId: string | null } | null) => void
 }
 
 const ALERT_SOUND_KEY = 'sentrarmm.alertSound'
@@ -184,4 +187,7 @@ export const useDash = create<DashState>((set) => ({
       }
       return { pinnedDevices: next }
     }),
+  pendingCommand: null,
+  setPendingCommand: (c) =>
+    set({ pendingCommand: c ? { ...c, nonce: Date.now() } : null }),
 }))

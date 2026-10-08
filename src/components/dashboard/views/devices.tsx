@@ -27,6 +27,7 @@ import {
 import { toast } from 'sonner'
 import { api, computeHealthScore, type Device, type DeviceType, type MediaAsset } from '@/lib/types'
 import { useDash, type DeviceSort, type ViewId } from '@/lib/store'
+import DeviceActivity from '../device-activity'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -403,6 +404,10 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
             Save notes
           </Button>
         </div>
+      </DetailSection>
+
+      <DetailSection title="Recent activity">
+        <DeviceActivity deviceId={device.id} />
       </DetailSection>
 
       <DetailSection title="Maintenance">

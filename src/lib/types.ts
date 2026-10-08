@@ -250,6 +250,20 @@ export interface DashboardStats {
   auditEvents: number;
 }
 
+// ─────────────────────── Device activity timeline ───────────────────
+
+/** One merged entry of GET /api/devices/[id]/activity (reverse-chronological feed). */
+export interface DeviceActivityEntry {
+  id: string;
+  type: "command" | "file" | "media" | "network" | "location" | "alert";
+  title: string;
+  detail?: string;
+  status: string;
+  severity: "info" | "warning" | "critical";
+  at: string; // ISO timestamp
+}
+
+
 // ───────────────────────── Device health score ──────────────────────
 
 /**

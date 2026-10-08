@@ -17,6 +17,7 @@ import { api, type Alert } from '@/lib/types'
 import { useDash } from '@/lib/store'
 import { useAlerts } from './shared'
 import { cn } from '@/lib/utils'
+import { useMounted } from '@/hooks/use-mounted'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -49,6 +50,11 @@ export default function NotificationCenter() {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
   const [ackId, setAckId] = useState<string | null>(null)
+  // Radix Popover generates its content id via useId(); when the trigger is
+  // server-rendered this was a recurring (flaky, React 19) hydration-mismatch
+  // surface. SSR renders the identical-looking plain button — the interactive
+  // Popover wrapper swaps in right after mount (zero visual change).
+  const mounted = useMounted()
 
   // Live alerts for the panel — the always-mounted topbar owns the
   // ['alerts', 100] cache entry so the full Alerts view shares it for free.
@@ -102,27 +108,31 @@ export default function NotificationCenter() {
 
   const shown = [...unack, ...alerts.filter((a) => a.acknowledged)].slice(0, 8)
 
+  const bellButton = (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="relative size-11"
+      aria-label={`Notifications${unread > 0 ? ` (${unread} unread)` : ''}`}
+    >
+      {unread > 0 ? (
+        <BellRing className="size-[18px] text-emerald-600 dark:text-emerald-400" aria-hidden />
+      ) : (
+        <Bell className="size-[18px]" aria-hidden />
+      )}
+      {unread > 0 ? (
+        <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-none text-white">
+          {unread > 99 ? '99+' : unread}
+        </span>
+      ) : null}
+    </Button>
+  )
+
+  if (!mounted) return bellButton
+
   return (
     <Popover open={open} onOpenChange={openPanel}>
-      <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="relative size-11"
-          aria-label={`Notifications${unread > 0 ? ` (${unread} unread)` : ''}`}
-        >
-          {unread > 0 ? (
-            <BellRing className="size-[18px] text-emerald-600 dark:text-emerald-400" aria-hidden />
-          ) : (
-            <Bell className="size-[18px]" aria-hidden />
-          )}
-          {unread > 0 ? (
-            <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-none text-white">
-              {unread > 99 ? '99+' : unread}
-            </span>
-          ) : null}
-        </Button>
-      </PopoverTrigger>
+      <PopoverTrigger asChild>{bellButton}</PopoverTrigger>
       <PopoverContent
         align="end"
         sideOffset={8}

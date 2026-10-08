@@ -3,12 +3,32 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { AlertTriangle, Bell, Check, Info, ShieldAlert, ShieldCheck, type LucideIcon } from 'lucide-react'
+import {
+  AlertTriangle,
+  Bell,
+  Check,
+  Info,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
+  type LucideIcon,
+} from 'lucide-react'
 import { api, type Alert } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { EmptyState, ErrorBlock, LoadingBlock, Panel, SectionHeader, timeAgo, useDevices } from '../shared'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 
@@ -36,10 +56,22 @@ const SEVERITY_META: Record<
   },
 }
 
+type SeverityFilter = 'all' | 'critical' | 'warning' | 'info'
+
+const FILTER_ORDER: SeverityFilter[] = ['all', 'critical', 'warning', 'info']
+
+const FILTER_CHIP: Record<SeverityFilter, string> = {
+  all: 'border-border/60 bg-background/60 text-foreground',
+  critical: 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400',
+  warning: 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+  info: 'border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400',
+}
+
 export default function AlertsView() {
   const qc = useQueryClient()
   const [unackOnly, setUnackOnly] = useState(true)
   const [ackAllBusy, setAckAllBusy] = useState(false)
+  const [severityFilter, setSeverityFilter] = useState<SeverityFilter>('all')
 
   const { data: devices } = useDevices()
   const hostById = useMemo(() => new Map((devices ?? []).map((d) => [d.id, d])), [devices])
@@ -53,6 +85,39 @@ export default function AlertsView() {
 
   const alerts = alertsQuery.data ?? []
   const unackedCount = alerts.filter((a) => !a.acknowledged).length
+  const ackedCount = alerts.filter((a) => a.acknowledged).length
+
+  // severity counts over the loaded set (live on both unack and history lists)
+  const severityCounts = useMemo(() => {
+    const c: Record<SeverityFilter, number> = { all: alerts.length, critical: 0, warning: 0, info: 0 }
+    for (const a of alerts) {
+      if (a.severity === 'critical') c.critical++
+      else if (a.severity === 'warning') c.warning++
+      else c.info++
+    }
+    return c
+  }, [alerts])
+
+  const visible =
+    severityFilter === 'all' ? alerts : alerts.filter((a) => a.severity === severityFilter)
+
+  const clearAcked = useMutation({
+    mutationFn: () => api<{ deleted: number }>('/api/alerts/clear-acked', { method: 'POST' }),
+    onSuccess: (r) => {
+      toast.success(
+        r.deleted > 0
+          ? `Cleared ${r.deleted} acknowledged alert${r.deleted === 1 ? '' : 's'}`
+          : 'Nothing to clear',
+      )
+      qc.invalidateQueries({ queryKey: ['alerts'] })
+      qc.invalidateQueries({ queryKey: ['stats'] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
+    },
+    onError: (e) =>
+      toast.error('Failed to clear acknowledged alerts', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+  })
 
   const ack = useMutation({
     mutationFn: (id: string) => api<Alert>(`/api/alerts/${id}/ack`, { method: 'POST' }),
@@ -118,11 +183,81 @@ export default function AlertsView() {
               <Check className="h-4 w-4" />
               {ackAllBusy ? 'Acknowledging…' : 'Ack all visible'}
             </Button>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-11 border-rose-500/30 text-rose-600 hover:bg-rose-500/10 hover:text-rose-600 dark:text-rose-400 md:h-9"
+                  disabled={clearAcked.isPending || (!unackOnly && ackedCount === 0)}
+                  title={
+                    unackOnly
+                      ? 'Clears acknowledged alerts from history'
+                      : `${ackedCount} acknowledged in this list`
+                  }
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Clear acked
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent className="glass-strong">
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Clear acknowledged alerts?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This permanently removes every acknowledged alert from the
+                    history. Unacknowledged alerts are kept. This action cannot
+                    be undone.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    className="bg-rose-600 text-white hover:bg-rose-600/90"
+                    onClick={() => clearAcked.mutate()}
+                  >
+                    Clear acknowledged
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </>
         }
       />
 
       <Panel className="glass-hover overflow-hidden">
+        {/* severity filter toolbar */}
+        {!alertsQuery.isLoading && !alertsQuery.isError && alerts.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 border-b border-border/40 px-4 py-3">
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+              Severity
+            </span>
+            {FILTER_ORDER.map((f) => {
+              const active = severityFilter === f
+              return (
+                <button
+                  key={f}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setSeverityFilter(f)}
+                  className={cn(
+                    'flex min-h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium capitalize transition-all outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+                    active
+                      ? FILTER_CHIP[f] + ' shadow-sm'
+                      : 'border-border/50 bg-background/40 text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+                  )}
+                >
+                  {f}
+                  <span className="rounded-full bg-background/60 px-1.5 text-[10px] tabular-nums text-muted-foreground">
+                    {severityCounts[f]}
+                  </span>
+                </button>
+              )
+            })}
+            <span className="ml-auto text-xs text-muted-foreground" aria-live="polite">
+              showing {visible.length} of {alerts.length}
+            </span>
+          </div>
+        ) : null}
         {alertsQuery.isLoading ? (
           <LoadingBlock label="Loading alerts…" />
         ) : alertsQuery.isError ? (
@@ -141,9 +276,15 @@ export default function AlertsView() {
                 : 'Nothing has been raised by the fleet yet.'
             }
           />
+        ) : visible.length === 0 ? (
+          <EmptyState
+            icon={<ShieldCheck className="h-10 w-10" />}
+            title={`No ${severityFilter} alerts`}
+            hint="Try a different severity filter."
+          />
         ) : (
           <div className="max-h-[60vh] divide-y overflow-y-auto scroll-slim">
-            {alerts.map((a) => {
+            {visible.map((a) => {
               const meta = SEVERITY_META[a.severity] ?? SEVERITY_META.info
               const Icon = meta.icon
               const host = a.deviceId ? hostById.get(a.deviceId)?.hostname : null
@@ -151,11 +292,15 @@ export default function AlertsView() {
                 <div
                   key={a.id}
                   className={cn(
-                    'glass-hover flex flex-col gap-3 p-4 sm:flex-row sm:items-center',
-                    a.severity === 'critical' && !a.acknowledged
-                      ? 'border-l-2 border-rose-500'
-                      : undefined,
-                    meta.tint && !a.acknowledged ? meta.tint : undefined
+                    'glass-hover flex flex-col gap-3 border-l-2 p-4 sm:flex-row sm:items-center',
+                    a.acknowledged
+                      ? 'border-l-transparent'
+                      : a.severity === 'critical'
+                        ? 'border-l-rose-500'
+                        : a.severity === 'warning'
+                          ? 'border-l-amber-500'
+                          : 'border-l-teal-500',
+                    meta.tint && !a.acknowledged ? meta.tint : undefined,
                   )}
                 >
                   <div

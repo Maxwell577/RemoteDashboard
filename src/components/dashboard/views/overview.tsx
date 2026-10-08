@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Area,
@@ -66,32 +66,40 @@ const SEVERITY_BADGE: Record<Alert['severity'], string> = {
 
 /** Smoothly animates between numeric values (ease-out, reduced-motion aware). */
 function CountUp({ value, className }: { value: number; className?: string }) {
-  const [state, setState] = useState({ shown: value, target: value })
+  // Ref-based tween: deps are [value] ONLY (state in deps would restart the
+  // effect every frame and freeze the counter near its start value).
+  const [shown, setShown] = useState(value)
+  const fromRef = useRef(value)
+  const rafRef = useRef(0)
 
   useEffect(() => {
-    if (state.target === value) return
-    const from = state.shown
+    const from = fromRef.current
+    if (from === value) return
     const reduce =
       typeof window !== 'undefined' &&
       window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
     const DURATION = reduce ? 0 : 550
     const start = performance.now()
-    let raf: number
     const tick = (now: number) => {
       const t = DURATION === 0 ? 1 : Math.min(1, (now - start) / DURATION)
       const eased = 1 - Math.pow(1 - t, 3)
-      setState({ shown: from + (value - from) * eased, target: value })
-      if (t < 1) raf = requestAnimationFrame(tick)
+      const next = from + (value - from) * eased
+      fromRef.current = next
+      setShown(next)
+      if (t < 1) rafRef.current = requestAnimationFrame(tick)
+      else fromRef.current = value // land exactly on the target
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [value, state.target, state.shown])
+    rafRef.current = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafRef.current)
+  }, [value])
 
-  return (
-    <span className={className}>
-      {Number.isInteger(value) ? Math.round(state.shown) : state.shown.toFixed(1)}
-    </span>
-  )
+  // counters are non-negative by definition — clamp so a mid-flight
+  // fractional state can never render as a negative stat
+  const display = Number.isInteger(value)
+    ? Math.max(0, Math.round(shown))
+    : shown.toFixed(1)
+
+  return <span className={className}>{display}</span>
 }
 
 function StatCard({
@@ -115,7 +123,7 @@ function StatCard({
     zinc: 'text-zinc-500 dark:text-zinc-400',
   } as const
   return (
-    <Panel className="card-sheen glass-hover group relative overflow-hidden p-4">
+    <Panel className="card-sheen glass-hover group relative overflow-hidden p-4 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-primary/5">
       {/* corner sheen for the liquid-glass look */}
       <div
         aria-hidden
@@ -125,7 +133,7 @@ function StatCard({
         <span className="text-xs font-medium text-muted-foreground">{label}</span>
         <span
           className={cn(
-            'glass-inset flex h-7 w-7 shrink-0 items-center justify-center rounded-lg shadow-sm [&_svg]:size-3.5',
+            'glass-inset flex h-7 w-7 shrink-0 items-center justify-center rounded-lg shadow-sm transition-transform duration-300 group-hover:scale-110 [&_svg]:size-3.5',
             tints[tint]
           )}
         >
@@ -607,8 +615,8 @@ export default function Overview() {
       </div>
 
       {/* Recent activity + active alerts */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Panel className="p-4 sm:p-6">
+      <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+        <Panel className="min-w-0 p-4 sm:p-6">
           <h3 className="text-sm font-semibold">Recent activity</h3>
           <div className="mt-3">
             {auditLoading ? (
@@ -634,12 +642,17 @@ export default function Overview() {
                       className={cn('h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[a.severity])}
                       aria-hidden
                     />
-                    <span className="shrink-0 font-mono text-xs font-medium">{a.action}</span>
+                    <span className="min-w-0 shrink truncate font-mono text-xs font-medium" title={a.action}>
+                      {a.action}
+                    </span>
                     <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
                       {a.detail ?? ''}
                     </span>
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {timeAgo(a.createdAt)}
+                    <span
+                      className="shrink-0 text-xs tabular-nums text-muted-foreground"
+                      title={new Date(a.createdAt).toLocaleString()}
+                    >
+                      {timeAgoShort(a.createdAt)}
                     </span>
                   </li>
                 ))}
@@ -648,7 +661,7 @@ export default function Overview() {
           </div>
         </Panel>
 
-        <Panel className="p-4 sm:p-6">
+        <Panel className="min-w-0 p-4 sm:p-6">
           <h3 className="text-sm font-semibold">Active alerts</h3>
           <div className="mt-3">
             {alertsLoading ? (
@@ -680,8 +693,11 @@ export default function Overview() {
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">
                       {al.title}
                     </span>
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {timeAgo(al.createdAt)}
+                    <span
+                      className="shrink-0 text-xs tabular-nums text-muted-foreground"
+                      title={new Date(al.createdAt).toLocaleString()}
+                    >
+                      {timeAgoShort(al.createdAt)}
                     </span>
                   </li>
                 ))}

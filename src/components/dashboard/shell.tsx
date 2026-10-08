@@ -32,6 +32,7 @@ import ThemeToggle from './theme-toggle'
 import CommandPalette from './command-palette'
 import ShortcutsDialog, { HOTKEY_VIEWS } from './shortcuts-dialog'
 import NotificationCenter from './notification-center'
+import { useMounted } from '@/hooks/use-mounted'
 import { Kbd, ModKey } from './kbd'
 import Overview from './views/overview'
 import Devices from './views/devices'
@@ -129,14 +130,16 @@ function NavList({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
           {group.items.map((item) => {
             const active = view === item.view
             const Icon = item.icon
+            const hotkey = HOTKEY_VIEWS.find((h) => h.view === item.view)?.key
             return (
               <button
                 key={item.view}
                 type="button"
                 onClick={() => onNavigate(item.view)}
                 aria-current={active ? 'page' : undefined}
+                title={hotkey ? `${item.label} — Alt+${hotkey}` : item.label}
                 className={cn(
-                  'relative flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3 text-sm font-medium outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring/50',
+                  'group/nav relative flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3 text-sm font-medium outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring/50',
                   active
                     ? 'border border-primary/25 bg-primary/15 text-primary shadow-inner'
                     : 'border border-transparent text-muted-foreground hover:bg-primary/10 hover:text-foreground',
@@ -148,11 +151,18 @@ function NavList({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
                     className="absolute -left-3 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-primary shadow-[0_0_10px] shadow-primary/70"
                   />
                 ) : null}
-                <Icon className="size-[18px] shrink-0" aria-hidden />
+                <Icon className="size-[18px] shrink-0 transition-transform group-hover/nav:scale-110" aria-hidden />
                 <span>{item.label}</span>
                 {item.view === 'alerts' && unread > 0 ? (
                   <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-destructive px-1.5 text-[10px] font-bold leading-none text-white">
                     {unread > 99 ? '99+' : unread}
+                  </span>
+                ) : hotkey ? (
+                  <span
+                    aria-hidden
+                    className="ml-auto hidden opacity-40 transition-opacity group-hover/nav:opacity-100 group-aria-[current=page]/nav:opacity-100 lg:inline-flex"
+                  >
+                    <Kbd>Alt {hotkey}</Kbd>
                   </span>
                 ) : null}
               </button>
@@ -188,7 +198,7 @@ function SidebarFooter() {
     <div className="mt-auto flex flex-col gap-2">
       <HubPill />
       <p className="text-center text-[11px] text-muted-foreground">
-        v0.1.5 • open source
+        v0.1.6 • open source
       </p>
     </div>
   )
@@ -206,20 +216,16 @@ export default function DashboardShell() {
   const setHelpOpen = useDash((s) => s.setHelpOpen)
   const [navOpen, setNavOpen] = useState(false)
   const { data: devices } = useDevices()
+  // Global dialogs (palette / shortcuts) mount client-side only: their Radix
+  // Dialog subtrees otherwise render an sr-only header into the SSR HTML even
+  // when closed, which was the source of a flaky useId hydration mismatch.
+  const mounted = useMounted()
 
   // Global hotkeys: Alt+1…9/0 switch views, "?" opens the shortcuts dialog.
-  // Ignored while typing in inputs or when the command palette is open.
+  // Alt-combos work even while typing (they can't insert text); the plain
+  // "?" key is ignored while typing in inputs or when the palette is open.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null
-      const typing =
-        !!target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.tagName === 'SELECT' ||
-          target.isContentEditable)
-      if (typing || useDash.getState().paletteOpen || e.metaKey || e.ctrlKey)
-        return
       if (e.altKey) {
         const hit = HOTKEY_VIEWS.find((v) => v.key === e.key)
         if (hit) {
@@ -228,6 +234,14 @@ export default function DashboardShell() {
         }
         return
       }
+      const target = e.target as HTMLElement | null
+      const typing =
+        !!target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      if (typing || useDash.getState().paletteOpen || e.metaKey || e.ctrlKey) return
       if (e.key === '?') {
         e.preventDefault()
         setHelpOpen(true)
@@ -250,8 +264,12 @@ export default function DashboardShell() {
     <div className="flex min-h-screen flex-col">
       <div className="mesh-bg" aria-hidden />
       <Realtime />
-      <CommandPalette />
-      <ShortcutsDialog />
+      {mounted ? (
+        <>
+          <CommandPalette />
+          <ShortcutsDialog />
+        </>
+      ) : null}
 
       {/* Topbar */}
       <header className="glass-strong sticky top-0 z-40 h-14 w-full">

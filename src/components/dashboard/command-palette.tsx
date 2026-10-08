@@ -2,13 +2,14 @@
 
 import { useEffect } from 'react'
 import { useTheme } from 'next-themes'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   Bell,
   Camera,
   Cpu,
   FolderTree,
+  History,
   Keyboard,
   LayoutDashboard,
   LocateFixed,
@@ -34,9 +35,10 @@ import {
   CommandList,
   CommandSeparator,
 } from '@/components/ui/command'
-import { api, type Alert, type Device } from '@/lib/types'
+import { api, type Alert, type CommandExecution, type Device } from '@/lib/types'
 import { useDash, type ViewId } from '@/lib/store'
 import { useDevices } from './shared'
+import { cn } from '@/lib/utils'
 import { Kbd, ModKey } from './kbd'
 
 const NAV_ITEMS: { view: ViewId; label: string; icon: typeof LayoutDashboard }[] = [
@@ -67,6 +69,26 @@ export default function CommandPalette() {
   const qc = useQueryClient()
   const { resolvedTheme, setTheme } = useTheme()
 
+  // recent executions for the "Run again" group — fetched only while open
+  const recent = useQuery({
+    queryKey: ['commands', 'palette'] as const,
+    queryFn: () => api<CommandExecution[]>('/api/commands?limit=12'),
+    enabled: open,
+    staleTime: 10_000,
+  })
+  const recentCommands = (() => {
+    const seen = new Set<string>()
+    const out: CommandExecution[] = []
+    for (const c of recent.data ?? []) {
+      const key = `${c.deviceId}::${c.command}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(c)
+      if (out.length >= 5) break
+    }
+    return out
+  })()
+
   // global hotkey
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -88,6 +110,14 @@ export default function CommandPalette() {
     run(() => {
       setSelectedDeviceId(d.id)
       setView('terminal')
+    })
+
+  const rerun = (c: CommandExecution) =>
+    run(() => {
+      setSelectedDeviceId(c.deviceId)
+      useDash.getState().setPendingCommand({ command: c.command, deviceId: c.deviceId })
+      setView('terminal')
+      toast.info('Loaded into terminal — press Enter to run')
     })
 
   const screenshot = async () => {
@@ -175,6 +205,44 @@ export default function CommandPalette() {
         </CommandGroup>
 
         <CommandSeparator />
+
+        {recentCommands.length > 0 ? (
+          <>
+            <CommandGroup heading="Run again (recent commands)">
+              {recentCommands.map((c) => {
+                const host = (devices ?? []).find((d) => d.id === c.deviceId)?.hostname
+                return (
+                  <CommandItem
+                    key={c.id}
+                    value={`rerun ${c.command} ${host ?? ''}`}
+                    onSelect={() => rerun(c)}
+                    className="gap-2.5 rounded-lg aria-selected:bg-primary/15 aria-selected:text-primary"
+                  >
+                    <History className="size-4 shrink-0" aria-hidden />
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs" title={c.command}>
+                      {c.command}
+                    </span>
+                    <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground/60">
+                      {host ?? 'unknown'}
+                      <span
+                        className={cn(
+                          'inline-block size-1.5 rounded-full',
+                          c.status === 'completed'
+                            ? 'bg-emerald-500'
+                            : c.status === 'running' || c.status === 'pending'
+                              ? 'bg-amber-500'
+                              : 'bg-rose-500',
+                        )}
+                        aria-hidden
+                      />
+                    </span>
+                  </CommandItem>
+                )
+              })}
+            </CommandGroup>
+            <CommandSeparator />
+          </>
+        ) : null}
 
         <CommandGroup heading="Jump to device (opens terminal)">
           {(devices ?? []).map((d) => (

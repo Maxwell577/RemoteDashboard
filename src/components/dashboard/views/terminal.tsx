@@ -90,6 +90,25 @@ export default function Terminal() {
     if (el) el.scrollTop = el.scrollHeight
   }, [entries])
 
+  // one-shot command handed over from the command palette ("run again") —
+  // selects the originating device, fills the prompt and focuses it
+  const pendingCommand = useDash((s) => s.pendingCommand)
+  useEffect(() => {
+    if (!pendingCommand) return
+    // deferred so the palette→terminal navigation settles first; also keeps
+    // this effect free of synchronous setState (react-hooks rules)
+    const t = setTimeout(() => {
+      const pc = useDash.getState().pendingCommand
+      if (!pc) return
+      if (pc.deviceId) useDash.getState().setSelectedDeviceId(pc.deviceId)
+      setInput(pc.command)
+      setHistIdx(null)
+      useDash.getState().setPendingCommand(null)
+      inputRef.current?.focus()
+    }, 60)
+    return () => clearTimeout(t)
+  }, [pendingCommand?.nonce])
+
   const runCmd = useMutation({
     mutationFn: async (v: { deviceId: string; command: string; entryId: string }) =>
       api<CommandExecution>('/api/commands', {
