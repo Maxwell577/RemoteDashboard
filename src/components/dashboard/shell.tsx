@@ -1,11 +1,12 @@
 'use client'
 
-import { useState, type ComponentType } from 'react'
+import { useEffect, useState, type ComponentType } from 'react'
 import {
   Bell,
   Clapperboard,
   Cpu,
   FolderTree,
+  Keyboard,
   LayoutDashboard,
   MapPin,
   Menu,
@@ -16,6 +17,8 @@ import {
   ShieldCheck,
   SquareTerminal,
   Search,
+  Volume2,
+  VolumeX,
   type LucideIcon,
 } from 'lucide-react'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
@@ -27,6 +30,7 @@ import { StatusDot, useDevices } from './shared'
 import Realtime from './realtime'
 import ThemeToggle from './theme-toggle'
 import CommandPalette from './command-palette'
+import ShortcutsDialog, { HOTKEY_VIEWS } from './shortcuts-dialog'
 import { Kbd, ModKey } from './kbd'
 import Overview from './views/overview'
 import Devices from './views/devices'
@@ -177,7 +181,7 @@ function SidebarFooter() {
     <div className="mt-auto flex flex-col gap-2">
       <HubPill />
       <p className="text-center text-[11px] text-muted-foreground">
-        v0.1.2 • open source
+        v0.1.3 • open source
       </p>
     </div>
   )
@@ -191,8 +195,41 @@ export default function DashboardShell() {
   const hubOnline = useDash((s) => s.hubOnline)
   const unread = useDash((s) => s.unreadAlerts)
   const setPaletteOpen = useDash((s) => s.setPaletteOpen)
+  const alertSound = useDash((s) => s.alertSound)
+  const setAlertSound = useDash((s) => s.setAlertSound)
+  const setHelpOpen = useDash((s) => s.setHelpOpen)
   const [navOpen, setNavOpen] = useState(false)
   const { data: devices } = useDevices()
+
+  // Global hotkeys: Alt+1…9/0 switch views, "?" opens the shortcuts dialog.
+  // Ignored while typing in inputs or when the command palette is open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      const typing =
+        !!target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      if (typing || useDash.getState().paletteOpen || e.metaKey || e.ctrlKey)
+        return
+      if (e.altKey) {
+        const hit = HOTKEY_VIEWS.find((v) => v.key === e.key)
+        if (hit) {
+          e.preventDefault()
+          useDash.getState().setView(hit.view)
+        }
+        return
+      }
+      if (e.key === '?') {
+        e.preventDefault()
+        setHelpOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [setHelpOpen])
 
   const deviceList = devices ?? []
   const onlineCount = deviceList.filter((d) => d.status === 'online').length
@@ -208,6 +245,7 @@ export default function DashboardShell() {
       <div className="mesh-bg" aria-hidden />
       <Realtime />
       <CommandPalette />
+      <ShortcutsDialog />
 
       {/* Topbar */}
       <header className="glass-strong sticky top-0 z-40 h-14 w-full">
@@ -279,6 +317,32 @@ export default function DashboardShell() {
                   {unread > 99 ? '99+' : unread}
                 </span>
               ) : null}
+            </Button>
+
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-11"
+              aria-label={alertSound ? 'Mute alert sound' : 'Unmute alert sound'}
+              title={alertSound ? 'Alert sound on — click to mute' : 'Alert sound muted — click to enable'}
+              onClick={() => setAlertSound(!alertSound)}
+            >
+              {alertSound ? (
+                <Volume2 className="size-[18px] text-emerald-600 dark:text-emerald-400" aria-hidden />
+              ) : (
+                <VolumeX className="size-[18px] text-zinc-500" aria-hidden />
+              )}
+            </Button>
+
+            <Button
+              variant="ghost"
+              size="icon"
+              className="hidden size-11 sm:inline-flex"
+              aria-label="Keyboard shortcuts"
+              title="Keyboard shortcuts (?)"
+              onClick={() => setHelpOpen(true)}
+            >
+              <Keyboard className="size-[18px]" aria-hidden />
             </Button>
 
             <ThemeToggle />

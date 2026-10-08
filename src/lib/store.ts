@@ -44,6 +44,23 @@ interface DashState {
   /** global command palette (⌘K) */
   paletteOpen: boolean
   setPaletteOpen: (v: boolean) => void
+  /** keyboard-shortcuts help dialog ("?" / palette action) */
+  helpOpen: boolean
+  setHelpOpen: (v: boolean) => void
+  /** audible blip on new realtime alerts (persisted to localStorage) */
+  alertSound: boolean
+  setAlertSound: (v: boolean) => void
+}
+
+const ALERT_SOUND_KEY = 'sentrarmm.alertSound'
+
+function initialAlertSound(): boolean {
+  if (typeof window === 'undefined') return true
+  try {
+    return window.localStorage.getItem(ALERT_SOUND_KEY) !== 'off'
+  } catch {
+    return true
+  }
 }
 
 export const useDash = create<DashState>((set) => ({
@@ -69,6 +86,19 @@ export const useDash = create<DashState>((set) => ({
   unreadAlerts: 0,
   bumpUnreadAlerts: () => set((s) => ({ unreadAlerts: s.unreadAlerts + 1 })),
   clearUnreadAlerts: () => set({ unreadAlerts: 0 }),
+  alertSound: initialAlertSound(),
   paletteOpen: false,
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+  helpOpen: false,
+  setHelpOpen: (helpOpen) => set({ helpOpen }),
+  setAlertSound: (alertSound) => {
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(ALERT_SOUND_KEY, alertSound ? 'on' : 'off')
+      }
+    } catch {
+      // storage unavailable (private mode) — in-memory only
+    }
+    set({ alertSound })
+  },
 }))

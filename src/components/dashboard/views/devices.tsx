@@ -15,6 +15,7 @@ import {
   MonitorSmartphone,
   Server,
   SquareTerminal,
+  Timer,
   type LucideIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -471,7 +472,7 @@ function DeviceCard({ device }: { device: Device }) {
   const metricsByDevice = useDash((s) => s.metricsByDevice)
   const [detailsOpen, setDetailsOpen] = useState(false)
 
-  const Icon = TYPE_ICON[device.deviceType]
+  const TypeIcon = TYPE_ICON[device.deviceType]
   const online = device.status === 'online'
   const m = online ? metricsByDevice[device.id] : undefined
   const health = computeHealthScore({
@@ -495,20 +496,32 @@ function DeviceCard({ device }: { device: Device }) {
             <StatusDot online={online} />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
-              <h3 className="truncate font-semibold leading-tight">{device.hostname}</h3>
-              <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            {/* hostname gets the full row so it never over-truncates */}
+            <div className="flex min-w-0 items-center gap-1.5">
+              <h3
+                className="min-w-0 truncate font-semibold leading-tight"
+                title={device.hostname}
+              >
+                {device.hostname}
+              </h3>
+              <TypeIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
             </div>
-            <p className="truncate text-xs text-muted-foreground">
-              {device.friendlyName ?? 'No friendly name'}
-            </p>
+            <div className="mt-0.5 flex items-center gap-1.5">
+              <p
+                className="min-w-0 truncate text-xs text-muted-foreground"
+                title={device.friendlyName ?? undefined}
+              >
+                {device.friendlyName ?? 'No friendly name'}
+              </p>
+              <Badge
+                variant="outline"
+                className="ml-auto max-w-[150px] shrink-0 truncate border-border/60 bg-background/40 text-[10px]"
+                title={device.osName}
+              >
+                {device.osName}
+              </Badge>
+            </div>
           </div>
-          <Badge
-            variant="outline"
-            className="shrink-0 border-border/60 bg-background/40 text-[10px]"
-          >
-            {device.osName}
-          </Badge>
         </div>
 
         <dl className="mt-3 flex flex-col gap-1 text-xs">
@@ -556,6 +569,20 @@ function DeviceCard({ device }: { device: Device }) {
                 : timeAgo(device.lastSeen)}
             </dd>
           </div>
+          {online && m ? (
+            <div className="flex items-baseline justify-between gap-3">
+              <dt className="flex shrink-0 items-center gap-1 text-muted-foreground">
+                <Timer className="size-3" aria-hidden />
+                Uptime
+              </dt>
+              <dd
+                className="truncate text-right font-medium tabular-nums"
+                title={`Last boot ${new Date(Date.now() - m.uptimeSec * 1000).toLocaleString()}`}
+              >
+                {fmtUptime(m.uptimeSec)}
+              </dd>
+            </div>
+          ) : null}
         </dl>
 
         {device.tags.length > 0 ? (

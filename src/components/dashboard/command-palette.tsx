@@ -9,6 +9,7 @@ import {
   Camera,
   Cpu,
   FolderTree,
+  Keyboard,
   LayoutDashboard,
   LocateFixed,
   MonitorSmartphone,
@@ -36,6 +37,7 @@ import {
 import { api, type Alert, type Device } from '@/lib/types'
 import { useDash, type ViewId } from '@/lib/store'
 import { useDevices } from './shared'
+import { Kbd, ModKey } from './kbd'
 
 const NAV_ITEMS: { view: ViewId; label: string; icon: typeof LayoutDashboard }[] = [
   { view: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -249,8 +251,33 @@ export default function CommandPalette() {
             )}
             <span>Toggle light / dark theme</span>
           </CommandItem>
+          <CommandItem
+            value="keyboard shortcuts help hotkeys"
+            onSelect={() =>
+              run(() => useDash.getState().setHelpOpen(true))
+            }
+            className="gap-2.5 rounded-lg aria-selected:bg-primary/15 aria-selected:text-primary"
+          >
+            <Keyboard className="size-4" aria-hidden />
+            <span>Keyboard shortcuts</span>
+            <span className="ml-auto flex shrink-0 items-center gap-0.5">
+              <Kbd>?</Kbd>
+            </span>
+          </CommandItem>
         </CommandGroup>
       </CommandList>
+      <div className="flex items-center justify-center gap-1.5 border-t border-border/40 px-4 py-2 text-[11px] text-muted-foreground">
+        <Kbd>
+          <ModKey />
+        </Kbd>
+        <Kbd>K</Kbd>
+        <span className="mr-2">palette</span>
+        <Kbd>Alt</Kbd>
+        <Kbd>1-9</Kbd>
+        <span className="mr-2">views</span>
+        <Kbd>?</Kbd>
+        <span>shortcuts</span>
+      </div>
     </CommandDialog>
   )
 }

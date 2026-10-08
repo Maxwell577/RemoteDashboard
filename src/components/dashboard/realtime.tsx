@@ -5,6 +5,7 @@ import { io, type Socket } from 'socket.io-client'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { useDash } from '@/lib/store'
+import { playAlertSound } from '@/lib/alert-sound'
 import type { Alert, Device, DeviceMetrics, ScreenFrame } from '@/lib/types'
 
 /**
@@ -61,6 +62,7 @@ export default function Realtime() {
       if (a.severity === 'critical') toast.error(a.title, { description: a.message })
       else if (a.severity === 'warning') toast.warning(a.title, { description: a.message })
       else toast.info(a.title, { description: a.message })
+      if (useDash.getState().alertSound) playAlertSound(a.severity)
       qc.invalidateQueries({ queryKey: ['alerts'] })
       bumpUnread()
     })

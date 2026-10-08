@@ -195,8 +195,11 @@ export default function NetworkView() {
         <EmptyState
           icon={<RadioTower className="h-10 w-10" />}
           title="No device selected"
-          hint="Pick a device from the selector to start a packet capture."
+          hint="Pick a device below to start a packet capture."
         />
+        <div className="mx-auto w-full max-w-sm">
+          <DeviceSelector value={selectedDeviceId} onChange={setSelectedDeviceId} />
+        </div>
       </div>
     )
   }

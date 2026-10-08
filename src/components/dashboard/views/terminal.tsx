@@ -1,9 +1,17 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Eraser, History, Loader2, Play, SquareTerminal, TriangleAlert } from 'lucide-react'
+import {
+  Eraser,
+  History,
+  Loader2,
+  Play,
+  RadioTower,
+  SquareTerminal,
+  TriangleAlert,
+} from 'lucide-react'
 import { api, type CommandExecution, type SavedCommand } from '@/lib/types'
 import { useDash } from '@/lib/store'
 import {
@@ -17,6 +25,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 
 const QUICK_COMMANDS = [
@@ -37,6 +46,8 @@ interface TerminalEntry {
   output: string | null
   exitCode: number | null
   durationMs: number | null
+  /** set when the entry came from a broadcast run (target hostname) */
+  host?: string
 }
 
 function uid(): string {
@@ -55,11 +66,15 @@ export default function Terminal() {
   const { data: devices } = useDevices()
   const device = devices?.find((d) => d.id === selectedDeviceId) ?? null
   const online = device?.status === 'online'
+  const onlineDevices = (devices ?? []).filter((d) => d.status === 'online')
 
   const [input, setInput] = useState('')
   const [entries, setEntries] = useState<TerminalEntry[]>([])
   const [history, setHistory] = useState<string[]>([])
   const [histIdx, setHistIdx] = useState<number | null>(null)
+  const [broadcast, setBroadcast] = useState(false)
+  const [broadcastBusy, setBroadcastBusy] = useState(false)
+  const qc = useQueryClient()
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -113,7 +128,83 @@ export default function Terminal() {
 
   const submit = () => {
     const cmd = input.trim()
-    if (!cmd || !selectedDeviceId || runCmd.isPending) return
+    if (!cmd || runCmd.isPending || broadcastBusy) return
+
+    // fleet broadcast — run the same command on every online device
+    if (broadcast) {
+      if (onlineDevices.length === 0) return
+      const at = new Date().toISOString()
+      const batch = onlineDevices.map((d) => ({
+        id: uid(),
+        deviceId: d.id,
+        host: d.hostname,
+      }))
+      setEntries((prev) => [
+        ...prev,
+        ...batch.map((b) => ({
+          id: b.id,
+          command: cmd,
+          at,
+          status: 'running' as const,
+          output: null,
+          exitCode: null,
+          durationMs: null,
+          host: b.host,
+        })),
+      ])
+      setHistory((prev) => [...prev.slice(-49), cmd])
+      setHistIdx(null)
+      setInput('')
+      setBroadcastBusy(true)
+      const results = batch.map((b) =>
+        api<CommandExecution>('/api/commands', {
+          method: 'POST',
+          body: JSON.stringify({ deviceId: b.deviceId, command: cmd }),
+        })
+          .then((data) => {
+            const failed = data.status === 'failed' || data.status === 'timeout'
+            setEntries((prev) =>
+              prev.map((e) =>
+                e.id === b.id
+                  ? {
+                      ...e,
+                      status: failed ? ('failed' as const) : ('completed' as const),
+                      output: data.output,
+                      exitCode: data.exitCode,
+                      durationMs: data.durationMs,
+                    }
+                  : e,
+              ),
+            )
+            return failed ? ('failed' as const) : ('ok' as const)
+          })
+          .catch((error: unknown) => {
+            const msg = error instanceof Error ? error.message : 'Request failed'
+            setEntries((prev) =>
+              prev.map((e) =>
+                e.id === b.id ? { ...e, status: 'failed' as const, output: msg } : e,
+              ),
+            )
+            return 'failed' as const
+          }),
+      )
+      void Promise.all(results).then((outcomes) => {
+        const ok = outcomes.filter((o) => o === 'ok').length
+        const failed = outcomes.length - ok
+        if (failed === 0) {
+          toast.success(`Broadcast complete — ${ok}/${outcomes.length} devices succeeded`)
+        } else {
+          toast.warning(`Broadcast finished — ${ok} ok, ${failed} failed`, {
+            description: 'See per-device output below.',
+          })
+        }
+        setBroadcastBusy(false)
+        qc.invalidateQueries({ queryKey: ['commands'] })
+      })
+      return
+    }
+
+    if (!selectedDeviceId) return
     const id = uid()
     setEntries((prev) => [
       ...prev,
@@ -272,6 +363,23 @@ export default function Terminal() {
               Device
             </p>
             <DeviceSelector value={selectedDeviceId} onChange={setSelectedDeviceId} className="sm:w-full" />
+            <label className="glass-inset flex min-h-11 cursor-pointer items-center justify-between gap-2 rounded-lg px-3">
+              <span className="flex items-center gap-1.5 text-xs font-medium">
+                <RadioTower className="size-3.5 text-primary" aria-hidden />
+                Broadcast
+              </span>
+              <Switch
+                checked={broadcast}
+                onCheckedChange={setBroadcast}
+                disabled={onlineDevices.length === 0}
+                aria-label="Run commands on all online devices"
+              />
+            </label>
+            <p className="px-1 text-[11px] leading-snug text-muted-foreground">
+              {broadcast
+                ? `Runs on ALL online devices (${onlineDevices.length}) instead of the selection.`
+                : 'Toggle to run a command on every online device at once.'}
+            </p>
           </div>
 
           <div className="flex flex-col gap-2">
@@ -324,15 +432,24 @@ export default function Terminal() {
           <Panel className="flex min-w-0 flex-1 flex-col overflow-hidden p-0">
             <div className="terminal-glass flex items-center justify-between gap-2 px-4 py-2">
               <span className="truncate font-mono text-xs text-emerald-300">
-                PS &gt; {device?.hostname ?? 'no device'}
+                PS &gt;{' '}
+                {broadcast
+                  ? `broadcast → ${onlineDevices.length} online`
+                  : device?.hostname ?? 'no device'}
               </span>
               <span className="flex shrink-0 items-center gap-2 text-xs text-zinc-400">
-                <StatusDot online={online} />
-                {online ? 'connected' : 'offline'}
+                {device ? <StatusDot online={online} /> : null}
+                {broadcast
+                  ? 'all devices'
+                  : device
+                    ? online
+                      ? 'connected'
+                      : 'offline'
+                    : 'no device'}
               </span>
             </div>
 
-            {!online && (
+            {device && !online && !broadcast && (
               <div className="flex items-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-600 dark:text-amber-400">
                 <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
                 Device is offline — commands will fail until it reconnects
@@ -354,7 +471,17 @@ export default function Terminal() {
                 <div className="flex flex-col gap-4">
                   {entries.map((e) => (
                     <div key={e.id} className="flex flex-col gap-1">
-                      <p className="font-semibold text-emerald-300">PS C:\&gt; {e.command}</p>
+                      <p className="flex flex-wrap items-center gap-2 font-semibold text-emerald-300">
+                        <span>PS C:\&gt; {e.command}</span>
+                        {e.host ? (
+                          <Badge
+                            variant="outline"
+                            className="border-teal-500/30 bg-teal-500/10 px-1.5 py-0 font-mono text-[10px] font-medium text-teal-600 dark:text-teal-400"
+                          >
+                            {e.host}
+                          </Badge>
+                        ) : null}
+                      </p>
                       {e.status === 'running' ? (
                         <p className="flex items-center gap-2 text-zinc-400">
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -398,9 +525,13 @@ export default function Terminal() {
                     recall(1)
                   }
                 }}
-                placeholder="e.g. Get-Process | Select-Object -First 10"
+                placeholder={
+                  broadcast
+                    ? `Broadcast to ${onlineDevices.length} online devices…`
+                    : 'e.g. Get-Process | Select-Object -First 10'
+                }
                 className="h-11 min-w-0 flex-1 border-white/10 bg-white/5 font-mono text-[13px] text-zinc-100 placeholder:text-zinc-500"
-                disabled={!selectedDeviceId}
+                disabled={(!selectedDeviceId && !broadcast) || (broadcast && onlineDevices.length === 0)}
                 spellCheck={false}
                 autoComplete="off"
                 aria-label="PowerShell command"
@@ -408,15 +539,21 @@ export default function Terminal() {
               <Button
                 size="sm"
                 className="h-11 shrink-0 gap-2 bg-primary px-4"
-                disabled={!selectedDeviceId || runCmd.isPending || input.trim().length === 0}
+                disabled={
+                  (!selectedDeviceId && !broadcast) ||
+                  runCmd.isPending ||
+                  broadcastBusy ||
+                  input.trim().length === 0 ||
+                  (broadcast && onlineDevices.length === 0)
+                }
                 onClick={submit}
               >
-                {runCmd.isPending ? (
+                {runCmd.isPending || broadcastBusy ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <Play className="h-4 w-4" />
                 )}
-                Run
+                {broadcast ? 'Run all' : 'Run'}
               </Button>
             </div>
           </Panel>

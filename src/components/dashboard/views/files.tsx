@@ -380,6 +380,9 @@ export default function Files() {
           title="Select a device to browse files"
           hint="Pick a machine to explore its drives, upload, download and manage files."
         />
+        <div className="mx-auto w-full max-w-sm">
+          <DeviceSelector value={deviceId} onChange={setSelectedDeviceId} />
+        </div>
       </div>
     )
   }

@@ -19,6 +19,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { api, type AppSettings } from '@/lib/types'
+import { useDash } from '@/lib/store'
 import { cn } from '@/lib/utils'
 import { ErrorBlock, LoadingBlock, Panel, SectionHeader } from '../shared'
 import SavedCommands from './saved-commands'
@@ -112,6 +113,24 @@ function SwitchRow({
       </div>
       <Switch id={id} checked={checked} onCheckedChange={onChange} />
     </div>
+  )
+}
+
+/**
+ * Browser-local alert sound preference (NOT part of the server settings blob —
+ * it lives in localStorage via the zustand store and syncs with the topbar speaker button).
+ */
+function BrowserSoundRow() {
+  const alertSound = useDash((s) => s.alertSound)
+  const setAlertSound = useDash((s) => s.setAlertSound)
+  return (
+    <SwitchRow
+      id="alerts-browser-sound"
+      label="Alert sound in this browser"
+      description="short audible blip on new realtime alerts — device-local, not saved to the server"
+      checked={alertSound}
+      onChange={setAlertSound}
+    />
   )
 }
 
@@ -441,6 +460,7 @@ export default function SettingsView() {
             checked={form.alertsOnNewDevice}
             onChange={(v) => update('alertsOnNewDevice', v)}
           />
+          <BrowserSoundRow />
         </SectionCard>
 
         {/* 3-b. Agent enrollment — wide */}
@@ -523,7 +543,7 @@ export default function SettingsView() {
             </div>
             <div className="min-w-0 flex-1">
               <h3 className="font-semibold leading-tight">
-                About <span className="text-gradient">SentraRMM v0.1.2</span>
+                About <span className="text-gradient">SentraRMM v0.1.3</span>
               </h3>
               <p className="mt-1 text-sm text-muted-foreground">
                 Open-source, authorized-use RMM for your own fleet and security assessments.
