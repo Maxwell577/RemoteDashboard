@@ -129,6 +129,7 @@ export function toDevice(row: DeviceRow): Device {
     locationLon: row.locationLon,
     locationLabel: row.locationLabel,
     notes: row.notes,
+    maintenance: row.maintenance,
   };
 }
 

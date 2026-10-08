@@ -30,6 +30,22 @@ export async function POST(req: NextRequest) {
       deviceId = device?.id ?? null;
     }
 
+    // Maintenance window: suppress new alerts for this device (planned work —
+    // offline/disconnect noise should not page the operator). Respond ok so
+    // the hub does not retry, but skip the DB insert.
+    if (deviceId) {
+      const device = await db.device.findUnique({
+        where: { id: deviceId },
+        select: { maintenance: true, hostname: true },
+      });
+      if (device?.maintenance) {
+        console.log(
+          `alert suppressed (maintenance): "${body.title.trim()}" for ${device.hostname}`,
+        );
+        return ok({ suppressed: true });
+      }
+    }
+
     const alert = await db.alert.create({
       data: {
         deviceId,

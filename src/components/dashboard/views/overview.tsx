@@ -64,6 +64,36 @@ const SEVERITY_BADGE: Record<Alert['severity'], string> = {
 
 // ─────────────────────────── stat card atom ─────────────────────────
 
+/** Smoothly animates between numeric values (ease-out, reduced-motion aware). */
+function CountUp({ value, className }: { value: number; className?: string }) {
+  const [state, setState] = useState({ shown: value, target: value })
+
+  useEffect(() => {
+    if (state.target === value) return
+    const from = state.shown
+    const reduce =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const DURATION = reduce ? 0 : 550
+    const start = performance.now()
+    let raf: number
+    const tick = (now: number) => {
+      const t = DURATION === 0 ? 1 : Math.min(1, (now - start) / DURATION)
+      const eased = 1 - Math.pow(1 - t, 3)
+      setState({ shown: from + (value - from) * eased, target: value })
+      if (t < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [value, state.target, state.shown])
+
+  return (
+    <span className={className}>
+      {Number.isInteger(value) ? Math.round(state.shown) : state.shown.toFixed(1)}
+    </span>
+  )
+}
+
 function StatCard({
   icon,
   label,
@@ -102,7 +132,9 @@ function StatCard({
           {icon}
         </span>
       </div>
-      <p className="mt-2 text-2xl font-semibold tabular-nums tracking-tight">{value}</p>
+      <p className="mt-2 text-2xl font-semibold tabular-nums tracking-tight">
+        {typeof value === 'number' ? <CountUp value={value} /> : value}
+      </p>
       {subtitle ? (
         <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
       ) : null}
@@ -483,7 +515,7 @@ export default function Overview() {
                         <div className="flex items-center gap-2">
                           <StatusDot online pulse={false} />
                           <span
-                            className="min-w-0 flex-1 truncate text-sm font-medium"
+                            className="min-w-0 flex-1 truncate text-[13px] font-medium"
                             title={d.hostname}
                           >
                             {d.hostname}

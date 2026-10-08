@@ -47,6 +47,8 @@ export default function Realtime() {
       const known =
         cached?.find((x) => x.agentId === d.agentId || x.id === d.id) ?? null
       const hostname = d.hostname ?? known?.hostname ?? d.agentId ?? 'A device'
+      // maintenance window — no presence noise for machines under planned work
+      if (known?.maintenance) return
       const up = d.status === 'online'
       if (up) {
         toast.success(`${hostname} is online`, {

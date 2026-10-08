@@ -19,6 +19,8 @@ export type ViewId =
 /** Max CPU samples kept per device for the sparkline in the devices view. */
 const HISTORY_CAP = 40
 
+export type DeviceSort = 'hostname' | 'health' | 'lastSeen' | 'cpu'
+
 interface DashState {
   /** currently visible view (client-side routing, single / route) */
   view: ViewId
@@ -53,10 +55,41 @@ interface DashState {
   /** audible blip when a device connects or disconnects (persisted) */
   presenceSound: boolean
   setPresenceSound: (v: boolean) => void
+  /** devices view ordering (persisted) */
+  deviceSort: DeviceSort
+  setDeviceSort: (v: DeviceSort) => void
+  /** pinned device ids — always listed first in the Devices view (persisted) */
+  pinnedDevices: string[]
+  togglePinnedDevice: (id: string) => void
 }
 
 const ALERT_SOUND_KEY = 'sentrarmm.alertSound'
 const PRESENCE_SOUND_KEY = 'sentrarmm.presenceSound'
+const DEVICE_SORT_KEY = 'sentrarmm.deviceSort'
+const PINNED_KEY = 'sentrarmm.pinnedDevices'
+
+function initialDeviceSort(): DeviceSort {
+  if (typeof window === 'undefined') return 'hostname'
+  try {
+    const raw = window.localStorage.getItem(DEVICE_SORT_KEY)
+    const allowed: DeviceSort[] = ['hostname', 'health', 'lastSeen', 'cpu']
+    return allowed.includes(raw as DeviceSort) ? (raw as DeviceSort) : 'hostname'
+  } catch {
+    return 'hostname'
+  }
+}
+
+function initialPinned(): string[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(PINNED_KEY)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
 
 function initialAlertSound(): boolean {
   if (typeof window === 'undefined') return true
@@ -125,4 +158,30 @@ export const useDash = create<DashState>((set) => ({
     }
     set({ presenceSound })
   },
+  deviceSort: initialDeviceSort(),
+  setDeviceSort: (deviceSort) => {
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(DEVICE_SORT_KEY, deviceSort)
+      }
+    } catch {
+      // storage unavailable — in-memory only
+    }
+    set({ deviceSort })
+  },
+  pinnedDevices: initialPinned(),
+  togglePinnedDevice: (id) =>
+    set((s) => {
+      const next = s.pinnedDevices.includes(id)
+        ? s.pinnedDevices.filter((p) => p !== id)
+        : [...s.pinnedDevices, id]
+      try {
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem(PINNED_KEY, JSON.stringify(next))
+        }
+      } catch {
+        // storage unavailable — in-memory only
+      }
+      return { pinnedDevices: next }
+    }),
 }))

@@ -3,6 +3,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
+  ArrowDownWideNarrow,
   Camera,
   Clapperboard,
   Download,
@@ -16,17 +17,21 @@ import {
   Search,
   Server,
   SquareTerminal,
+  Star,
   Tag,
   Timer,
+  Wrench,
   X,
   type LucideIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, computeHealthScore, type Device, type DeviceType, type MediaAsset } from '@/lib/types'
-import { useDash, type ViewId } from '@/lib/store'
+import { useDash, type DeviceSort, type ViewId } from '@/lib/store'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   Dialog,
   DialogContent,
@@ -231,6 +236,8 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
   const [saving, setSaving] = useState(false)
   const [shot, setShot] = useState<MediaAsset | null>(null)
   const [shotBusy, setShotBusy] = useState(false)
+  const [maintenance, setMaintenance] = useState(device.maintenance)
+  const [maintBusy, setMaintBusy] = useState(false)
 
   const go = (v: ViewId) => {
     setSelectedDeviceId(device.id)
@@ -267,6 +274,27 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
       toast.error(e instanceof Error ? e.message : 'Screenshot failed')
     } finally {
       setShotBusy(false)
+    }
+  }
+
+  async function toggleMaintenance(next: boolean) {
+    setMaintBusy(true)
+    try {
+      await api<Device>(`/api/devices/${device.id}/maintenance`, {
+        method: 'POST',
+        body: JSON.stringify({ maintenance: next }),
+      })
+      setMaintenance(next)
+      toast.success(next ? 'Maintenance window opened' : 'Maintenance window closed', {
+        description: next
+          ? `Alerts for ${device.hostname} are suppressed`
+          : `Alerts for ${device.hostname} are active again`,
+      })
+      qc.invalidateQueries({ queryKey: ['devices'] })
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to update maintenance mode')
+    } finally {
+      setMaintBusy(false)
     }
   }
 
@@ -377,6 +405,31 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
         </div>
       </DetailSection>
 
+      <DetailSection title="Maintenance">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="flex items-center gap-1.5 text-xs font-medium">
+              <Wrench
+                className={cn('size-3.5', maintenance ? 'text-amber-500' : 'text-muted-foreground')}
+                aria-hidden
+              />
+              Maintenance window
+            </p>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {maintenance
+                ? 'Open — new alerts for this device are suppressed.'
+                : 'Closed — alerts fire normally.'}
+            </p>
+          </div>
+          <Switch
+            checked={maintenance}
+            onCheckedChange={(v) => toggleMaintenance(v)}
+            disabled={maintBusy}
+            aria-label={`Maintenance window for ${device.hostname}`}
+          />
+        </div>
+      </DetailSection>
+
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" onClick={() => go('terminal')}>
           <SquareTerminal className="size-3.5" aria-hidden /> Terminal
@@ -474,6 +527,8 @@ function DeviceCard({ device }: { device: Device }) {
   const setView = useDash((s) => s.setView)
   const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
   const metricsByDevice = useDash((s) => s.metricsByDevice)
+  const pinned = useDash((s) => s.pinnedDevices.includes(device.id))
+  const togglePinned = useDash((s) => s.togglePinnedDevice)
   const [detailsOpen, setDetailsOpen] = useState(false)
 
   const TypeIcon = TYPE_ICON[device.deviceType]
@@ -494,7 +549,13 @@ function DeviceCard({ device }: { device: Device }) {
 
   return (
     <>
-      <Panel className={cn('glass-hover flex flex-col p-4', !online && 'opacity-80')}>
+      <Panel
+        className={cn(
+          'glass-hover flex flex-col p-4',
+          !online && 'opacity-80',
+          pinned && 'ring-1 ring-primary/30',
+        )}
+      >
         <div className="flex items-start gap-2.5">
           <span className="mt-1.5">
             <StatusDot online={online} />
@@ -502,6 +563,15 @@ function DeviceCard({ device }: { device: Device }) {
           <div className="min-w-0 flex-1">
             {/* hostname gets the full row so it never over-truncates */}
             <div className="flex min-w-0 items-center gap-1.5">
+              {device.maintenance ? (
+                <span
+                  className="flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-px text-[10px] font-semibold text-amber-600 dark:text-amber-400"
+                  title="Maintenance window open — alerts suppressed"
+                >
+                  <Wrench className="size-3" aria-hidden />
+                  maint
+                </span>
+              ) : null}
               <h3
                 className="min-w-0 truncate font-semibold leading-tight"
                 title={device.hostname}
@@ -509,6 +579,22 @@ function DeviceCard({ device }: { device: Device }) {
                 {device.hostname}
               </h3>
               <TypeIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+              <button
+                type="button"
+                aria-label={pinned ? `Unpin ${device.hostname}` : `Pin ${device.hostname}`}
+                aria-pressed={pinned}
+                title={pinned ? 'Unpin device' : 'Pin to top'}
+                onClick={() => togglePinned(device.id)}
+                className="ml-auto shrink-0 rounded-md p-1 text-muted-foreground/50 outline-none transition-all hover:bg-primary/10 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring/50"
+              >
+                <Star
+                  className={cn(
+                    'size-4 transition-colors',
+                    pinned && 'fill-primary text-primary',
+                  )}
+                  aria-hidden
+                />
+              </button>
             </div>
             <div className="mt-0.5 flex items-center gap-1.5">
               <p
@@ -628,7 +714,14 @@ function DeviceCard({ device }: { device: Device }) {
 
 // ──────────────────────────── devices view ──────────────────────────
 
-type StatusFilter = 'all' | 'online' | 'offline'
+type StatusFilter = 'all' | 'online' | 'offline' | 'maintenance'
+
+const SORT_LABELS: Record<DeviceSort, string> = {
+  hostname: 'Hostname A–Z',
+  health: 'Health score',
+  lastSeen: 'Last seen',
+  cpu: 'CPU live',
+}
 
 function StatusFilterPill({
   active,
@@ -665,10 +758,15 @@ export default function Devices() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const deviceSort = useDash((s) => s.deviceSort)
+  const setDeviceSort = useDash((s) => s.setDeviceSort)
+  const pinnedDevices = useDash((s) => s.pinnedDevices)
+  const metricsByDevice = useDash((s) => s.metricsByDevice)
 
   const deviceList = devices ?? []
   const onlineCount = deviceList.filter((d) => d.status === 'online').length
   const offlineCount = deviceList.length - onlineCount
+  const maintenanceCount = deviceList.filter((d) => d.maintenance).length
 
   // every distinct tag in the fleet, alphabetical
   const allTags = useMemo(() => {
@@ -680,7 +778,9 @@ export default function Devices() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return deviceList.filter((d) => {
-      if (statusFilter !== 'all' && d.status !== statusFilter) return false
+      if (statusFilter === 'online' && d.status !== 'online') return false
+      if (statusFilter === 'offline' && d.status !== 'offline') return false
+      if (statusFilter === 'maintenance' && !d.maintenance) return false
       if (tagFilter && !d.tags.includes(tagFilter)) return false
       if (!q) return true
       return (
@@ -694,6 +794,39 @@ export default function Devices() {
       )
     })
   }, [deviceList, search, statusFilter, tagFilter])
+
+  // pinned devices always float to the top, then the chosen sort key
+  const sorted = useMemo(() => {
+    const healthOf = (d: Device) =>
+      computeHealthScore({
+        online: d.status === 'online',
+        cpuPercent: metricsByDevice[d.id]?.cpuPercent,
+        memoryPercent: metricsByDevice[d.id]?.memoryPercent,
+        diskPercent: metricsByDevice[d.id]?.diskPercent,
+        stale: d.status === 'online' && !metricsByDevice[d.id],
+      })
+    const byKey = (a: Device, b: Device): number => {
+      switch (deviceSort) {
+        case 'health':
+          return healthOf(b) - healthOf(a)
+        case 'lastSeen': {
+          const ta = new Date(a.lastSeen ?? a.firstSeen).getTime()
+          const tb = new Date(b.lastSeen ?? b.firstSeen).getTime()
+          return tb - ta
+        }
+        case 'cpu':
+          return (metricsByDevice[b.id]?.cpuPercent ?? -1) - (metricsByDevice[a.id]?.cpuPercent ?? -1)
+        case 'hostname':
+        default:
+          return a.hostname.localeCompare(b.hostname)
+      }
+    }
+    return [...filtered].sort((a, b) => {
+      const pa = pinnedDevices.includes(a.id) ? 0 : 1
+      const pb = pinnedDevices.includes(b.id) ? 0 : 1
+      return pa !== pb ? pa - pb : byKey(a, b)
+    })
+  }, [filtered, deviceSort, pinnedDevices, metricsByDevice])
 
   const filtersActive = search.trim() !== '' || statusFilter !== 'all' || tagFilter !== null
   const clearFilters = () => {
@@ -797,7 +930,7 @@ export default function Devices() {
           <div className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center gap-2">
               {/* search */}
-              <div className="relative min-w-0 flex-1 sm:max-w-xs">
+              <div className="relative w-full sm:w-auto sm:min-w-0 sm:max-w-xs sm:flex-1">
                 <Search
                   className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
                   aria-hidden
@@ -834,6 +967,34 @@ export default function Devices() {
                   count={offlineCount}
                   onClick={() => setStatusFilter('offline')}
                 />
+                <StatusFilterPill
+                  active={statusFilter === 'maintenance'}
+                  label="Maint"
+                  count={maintenanceCount}
+                  onClick={() => setStatusFilter('maintenance')}
+                />
+              </div>
+              {/* sort control */}
+              <div className="flex items-center gap-1.5">
+                <ArrowDownWideNarrow
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                  aria-hidden
+                />
+                <Select value={deviceSort} onValueChange={(v) => setDeviceSort(v as DeviceSort)}>
+                  <SelectTrigger
+                    className="glass-inset h-9 w-[132px] justify-between text-xs sm:w-[150px]"
+                    aria-label="Sort devices"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="glass-strong">
+                    {(Object.keys(SORT_LABELS) as DeviceSort[]).map((k) => (
+                      <SelectItem key={k} value={k} className="text-xs">
+                        {SORT_LABELS[k]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               {filtersActive ? (
                 <Button
@@ -914,7 +1075,7 @@ export default function Devices() {
             </p>
           ) : null}
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {filtered.map((d) => (
+            {sorted.map((d) => (
               <DeviceCard key={d.id} device={d} />
             ))}
           </div>

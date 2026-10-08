@@ -1,0 +1,664 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useState, type ReactNode } from 'react'
+     4→import { useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import {
+     6→  Area,
+     7→  AreaChart,
+     8→  CartesianGrid,
+     9→  ResponsiveContainer,
+    10→  Tooltip,
+    11→  XAxis,
+    12→  YAxis,
+    13→} from 'recharts'
+    14→import {
+    15→  ArrowRight,
+    16→  Bell,
+    17→  Clapperboard,
+    18→  LayoutDashboard,
+    19→  MonitorSmartphone,
+    20→  RadioTower,
+    21→  ScrollText,
+    22→  ShieldCheck,
+    23→  SquareTerminal,
+    24→} from 'lucide-react'
+    25→import {
+    26→  api,
+    27→  type Alert,
+    28→  type AuditLog,
+    29→  type DashboardStats,
+    30→  type Device,
+    31→} from '@/lib/types'
+    32→import { useDash } from '@/lib/store'
+    33→import { Badge } from '@/components/ui/badge'
+    34→import { Button } from '@/components/ui/button'
+    35→import { Progress } from '@/components/ui/progress'
+    36→import { cn } from '@/lib/utils'
+    37→import {
+    38→  EmptyState,
+    39→  ErrorBlock,
+    40→  LoadingBlock,
+    41→  Panel,
+    42→  SectionHeader,
+    43→  StatusDot,
+    44→  timeAgo,
+    45→  timeAgoShort,
+    46→  useDevices,
+    47→} from '../shared'
+    48→
+    49→const CPU_HISTORY = 40 // rolling buffer size (samples)
+    50→const NET_HISTORY = 40
+    51→const SAMPLE_MS = 5000
+    52→
+    53→const SEVERITY_DOT: Record<AuditLog['severity'], string> = {
+    54→  info: 'bg-emerald-500',
+    55→  warning: 'bg-amber-500',
+    56→  critical: 'bg-red-500',
+    57→}
+    58→
+    59→const SEVERITY_BADGE: Record<Alert['severity'], string> = {
+    60→  info: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+    61→  warning: 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+    62→  critical: 'border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400',
+    63→}
+    64→
+    65→// ─────────────────────────── stat card atom ─────────────────────────
+    66→
+    67→function StatCard({
+    68→  icon,
+    69→  label,
+    70→  value,
+    71→  subtitle,
+    72→  tint = 'emerald',
+    73→}: {
+    74→  icon: ReactNode
+    75→  label: string
+    76→  value: ReactNode
+    77→  subtitle?: ReactNode
+    78→  tint?: 'emerald' | 'teal' | 'amber' | 'rose' | 'zinc'
+    79→}) {
+    80→  const tints = {
+    81→    emerald: 'text-emerald-600 dark:text-emerald-400 shadow-emerald-500/20',
+    82→    teal: 'text-teal-600 dark:text-teal-400 shadow-teal-500/20',
+    83→    amber: 'text-amber-600 dark:text-amber-400 shadow-amber-500/20',
+    84→    rose: 'text-rose-600 dark:text-rose-400 shadow-rose-500/20',
+    85→    zinc: 'text-zinc-500 dark:text-zinc-400',
+    86→  } as const
+    87→  return (
+    88→    <Panel className="card-sheen glass-hover group relative overflow-hidden p-4">
+    89→      {/* corner sheen for the liquid-glass look */}
+    90→      <div
+    91→        aria-hidden
+    92→        className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full bg-primary/5 blur-2xl transition-opacity duration-300 group-hover:bg-primary/10"
+    93→      />
+    94→      <div className="flex items-center justify-between gap-2">
+    95→        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+    96→        <span
+    97→          className={cn(
+    98→            'glass-inset flex h-7 w-7 shrink-0 items-center justify-center rounded-lg shadow-sm [&_svg]:size-3.5',
+    99→            tints[tint]
+   100→          )}
+   101→        >
+   102→          {icon}
+   103→        </span>
+   104→      </div>
+   105→      <p className="mt-2 text-2xl font-semibold tabular-nums tracking-tight">{value}</p>
+   106→      {subtitle ? (
+   107→        <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
+   108→      ) : null}
+   109→    </Panel>
+   110→  )
+   111→}
+   112→
+   113→// ──────────────────────────── overview view ─────────────────────────
+   114→
+   115→export default function Overview() {
+   116→  const { data: devices } = useDevices()
+   117→  const metricsByDevice = useDash((s) => s.metricsByDevice)
+   118→  const setView = useDash((s) => s.setView)
+   119→  const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
+   120→
+   121→  const { data: stats } = useQuery({
+   122→    queryKey: ['stats'],
+   123→    queryFn: () => api<DashboardStats>('/api/stats'),
+   124→    refetchInterval: 15000,
+   125→  })
+   126→
+   127→  const { data: audit, isLoading: auditLoading, error: auditError } = useQuery({
+   128→    queryKey: ['audit', 8],
+   129→    queryFn: () => api<AuditLog[]>('/api/audit?limit=8'),
+   130→    refetchInterval: 20000,
+   131→  })
+   132→
+   133→  const { data: alerts, isLoading: alertsLoading, error: alertsError } = useQuery({
+   134→    queryKey: ['alerts', 5, 'unack'],
+   135→    queryFn: () => api<Alert[]>('/api/alerts?limit=5&unackOnly=1'),
+   136→    refetchInterval: 20000,
+   137→  })
+   138→
+   139→  const deviceList = devices ?? []
+   140→  const onlineDevices = deviceList.filter((d) => d.status === 'online')
+   141→  const onlineCount = stats?.onlineDevices ?? onlineDevices.length
+   142→  const metricsDevices = onlineDevices.filter((d) => metricsByDevice[d.id] != null)
+   143→
+   144→  // Rolling aggregate-CPU + fleet network I/O buffers: seeded with nulls so the
+   145→  // lines start rendering once real telemetry arrives. Samples every 5s, reading
+   146→  // the latest devices + metrics from the react-query cache / zustand store.
+   147→  const qc = useQueryClient()
+   148→  const [cpuSamples, setCpuSamples] = useState<(number | null)[]>(() =>
+   149→    Array(CPU_HISTORY).fill(null),
+   150→  )
+   151→  const [netSamples, setNetSamples] = useState<
+   152→    { down: number | null; up: number | null }[]
+   153→  >(() => Array.from({ length: NET_HISTORY }, () => ({ down: null, up: null })))
+   154→
+   155→  useEffect(() => {
+   156→    const sample = () => {
+   157→      const cached = qc.getQueryData<Device[]>(['devices']) ?? []
+   158→      const metrics = useDash.getState().metricsByDevice
+   159→      const live = cached.filter(
+   160→        (d) => d.status === 'online' && metrics[d.id] != null,
+   161→      )
+   162→      const avg =
+   163→        live.length > 0
+   164→          ? live.reduce((acc, d) => acc + metrics[d.id].cpuPercent, 0) / live.length
+   165→          : null
+   166→      setCpuSamples((prev) => [
+   167→        ...prev.slice(1),
+   168→        avg == null ? null : Math.round(avg * 10) / 10,
+   169→      ])
+   170→      // fleet aggregate network I/O (KB/s summed across reporting agents)
+   171→      if (live.length > 0) {
+   172→        const down = live.reduce((acc, d) => acc + metrics[d.id].netDownKBps, 0)
+   173→        const up = live.reduce((acc, d) => acc + metrics[d.id].netUpKBps, 0)
+   174→        setNetSamples((prev) => [
+   175→          ...prev.slice(1),
+   176→          { down: Math.round(down * 10) / 10, up: Math.round(up * 10) / 10 },
+   177→        ])
+   178→      } else {
+   179→        setNetSamples((prev) => [...prev.slice(1), { down: null, up: null }])
+   180→      }
+   181→    }
+   182→    const id = setInterval(sample, SAMPLE_MS)
+   183→    return () => clearInterval(id)
+   184→  }, [qc])
+   185→
+   186→  const chartData = useMemo(
+   187→    () => cpuSamples.map((cpu, i) => ({ i, cpu })),
+   188→    [cpuSamples],
+   189→  )
+   190→
+   191→  const netChartData = useMemo(
+   192→    () => netSamples.map((n, i) => ({ i, down: n.down, up: n.up })),
+   193→    [netSamples],
+   194→  )
+   195→
+   196→  // Chart summary chips — computed from the rolling buffers
+   197→  const chartStats = useMemo(() => {
+   198→    const vals = cpuSamples.filter((v): v is number => v != null)
+   199→    if (vals.length === 0) return null
+   200→    return {
+   201→      last: vals[vals.length - 1],
+   202→      avg: Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10,
+   203→      peak: Math.round(Math.max(...vals) * 10) / 10,
+   204→      samples: vals.length,
+   205→    }
+   206→  }, [cpuSamples])
+   207→
+   208→  const netStats = useMemo(() => {
+   209→    const downs = netSamples.map((n) => n.down).filter((v): v is number => v != null)
+   210→    const ups = netSamples.map((n) => n.up).filter((v): v is number => v != null)
+   211→    if (downs.length === 0) return null
+   212→    const sum = (arr: number[]) => Math.round(arr.reduce((a, b) => a + b, 0) * 10) / 10
+   213→    return {
+   214→      down: sum(downs),
+   215→      up: sum(ups),
+   216→      peakDown: sum([Math.max(...downs)]),
+   217→      peakUp: sum([Math.max(...ups)]),
+   218→      samples: downs.length,
+   219→    }
+   220→  }, [netSamples])
+   221→
+   222→  const glance = deviceList.slice(0, 6)
+   223→
+   224→  return (
+   225→    <div className="flex flex-col gap-6">
+   226→      <SectionHeader
+   227→        title="Fleet overview"
+   228→        subtitle="Live status across your managed machines"
+   229→        icon={<LayoutDashboard className="h-5 w-5" />}
+   230→      />
+   231→
+   232→      {/* Stat cards */}
+   233→      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-6">
+   234→        {(
+   235→          [
+   236→            <StatCard
+   237→              key="devices"
+   238→              icon={<MonitorSmartphone />}
+   239→              label="Total devices"
+   240→              value={stats?.totalDevices ?? deviceList.length}
+   241→              subtitle={<>{onlineCount} online</>}
+   242→              tint="emerald"
+   243→            />,
+   244→            <StatCard
+   245→              key="online"
+   246→              icon={<span className="status-dot status-dot--static bg-emerald-500" />}
+   247→              label="Online now"
+   248→              value={onlineCount}
+   249→              subtitle="agents reporting in"
+   250→              tint="teal"
+   251→            />,
+   252→            <StatCard
+   253→              key="commands"
+   254→              icon={<SquareTerminal />}
+   255→              label="Commands today"
+   256→              value={stats?.commandsToday ?? '—'}
+   257→              subtitle="executions since midnight"
+   258→              tint="zinc"
+   259→            />,
+   260→            <StatCard
+   261→              key="media"
+   262→              icon={<Clapperboard />}
+   263→              label="Active media"
+   264→              value={stats?.activeCaptures ?? '—'}
+   265→              subtitle="media captures running"
+   266→              tint="teal"
+   267→            />,
+   268→            <StatCard
+   269→              key="net"
+   270→              icon={<RadioTower />}
+   271→              label="Net captures"
+   272→              value={stats?.runningNetCaptures ?? '—'}
+   273→              subtitle="packet captures live"
+   274→              tint="amber"
+   275→            />,
+   276→            <StatCard
+   277→              key="alerts"
+   278→              icon={<Bell />}
+   279→              label="Unack alerts"
+   280→              value={stats?.unackAlerts ?? '—'}
+   281→              tint={stats && stats.unackAlerts > 0 ? 'amber' : 'zinc'}
+   282→              subtitle={
+   283→                stats && stats.criticalAlerts > 0 ? (
+   284→                  <span className="font-medium text-destructive">
+   285→                    {stats.criticalAlerts} critical
+   286→                  </span>
+   287→                ) : (
+   288→                  'nothing critical'
+   289→                )
+   290→              }
+   291→            />,
+   292→          ] as const
+   293→        ).map((card, i) => (
+   294→          <div
+   295→            key={i}
+   296→            className="animate-in fade-in slide-in-from-bottom-3 fill-mode-both duration-500"
+   297→            style={{ animationDelay: `${i * 70}ms` }}
+   298→          >
+   299→            {card}
+   300→          </div>
+   301→        ))}
+   302→      </div>
+   303→
+   304→      {/* Live performance + devices at a glance */}
+   305→      <div className="grid gap-4 lg:grid-cols-3">
+   306→        <Panel className="p-4 sm:p-6 lg:col-span-2">
+   307→          <div className="flex items-start justify-between gap-2">
+   308→            <div>
+   309→              <h3 className="text-sm font-semibold">Live performance</h3>
+   310→              <p className="text-xs text-muted-foreground">
+   311→                Aggregate CPU % averaged across online agents · sampled every 5s
+   312→              </p>
+   313→            </div>
+   314→            <Badge
+   315→              variant="outline"
+   316→              className="gap-1.5 border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+   317→            >
+   318→              <span className="status-dot status-dot--static bg-emerald-500" aria-hidden />
+   319→              live
+   320→            </Badge>
+   321→          </div>
+   322→
+   323→          {chartStats ? (
+   324→            <div className="mt-3 flex flex-wrap items-center gap-2">
+   325→              <Badge
+   326→                variant="outline"
+   327→                className="border-emerald-500/30 bg-emerald-500/10 font-mono text-[11px] text-emerald-600 dark:text-emerald-400"
+   328→              >
+   329→                now {chartStats.last}%
+   330→              </Badge>
+   331→              <Badge variant="secondary" className="font-mono text-[11px]">avg {chartStats.avg}%</Badge>
+   332→              <Badge variant="secondary" className="font-mono text-[11px]">peak {chartStats.peak}%</Badge>
+   333→              <span className="text-[11px] text-muted-foreground">{chartStats.samples} samples buffered</span>
+   334→            </div>
+   335→          ) : null}
+   336→
+   337→          <div className="mt-4 grid gap-6 lg:grid-cols-5">
+   338→            {/* Aggregate CPU area chart */}
+   339→            <div className="lg:col-span-3">
+   340→              <div className="h-44 text-muted-foreground sm:h-52">
+   341→                <ResponsiveContainer width="100%" height="100%">
+   342→                  <AreaChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+   343→                    <defs>
+   344→                      <linearGradient id="cpuAreaFill" x1="0" y1="0" x2="0" y2="1">
+   345→                        <stop offset="0%" stopColor="#10b981" stopOpacity={0.35} />
+   346→                        <stop offset="100%" stopColor="#10b981" stopOpacity={0.02} />
+   347→                      </linearGradient>
+   348→                    </defs>
+   349→                    <CartesianGrid stroke="#888" strokeOpacity={0.15} vertical={false} />
+   350→                    <XAxis dataKey="i" hide />
+   351→                    <YAxis
+   352→                      domain={[0, 100]}
+   353→                      ticks={[0, 50, 100]}
+   354→                      width={32}
+   355→                      tick={{ fill: 'currentColor', fontSize: 10 }}
+   356→                      axisLine={false}
+   357→                      tickLine={false}
+   358→                    />
+   359→                    <Tooltip
+   360→                      formatter={(value) =>
+   361→                        typeof value === 'number' ? `${value.toFixed(1)} %` : String(value)
+   362→                      }
+   363→                    />
+   364→                    <Area
+   365→                      type="monotone"
+   366→                      dataKey="cpu"
+   367→                      name="Aggregate CPU"
+   368→                      stroke="#10b981"
+   369→                      strokeWidth={2}
+   370→                      fill="url(#cpuAreaFill)"
+   371→                      connectNulls={false}
+   372→                      dot={false}
+   373→                      isAnimationActive={false}
+   374→                    />
+   375→                  </AreaChart>
+   376→                </ResponsiveContainer>
+   377→              </div>
+   378→
+   379→              {/* Fleet network I/O — aggregate down/up across reporting agents */}
+   380→              <div className="mt-4 border-t border-border/40 pt-3">
+   381→                <div className="flex flex-wrap items-center justify-between gap-2">
+   382→                  <p className="text-xs font-medium text-muted-foreground">
+   383→                    Fleet network I/O <span className="text-muted-foreground/60">· KB/s</span>
+   384→                  </p>
+   385→                  {netStats ? (
+   386→                    <div className="flex flex-wrap items-center gap-1.5">
+   387→                      <Badge
+   388→                        variant="outline"
+   389→                        className="border-emerald-500/30 bg-emerald-500/10 font-mono text-[11px] text-emerald-600 dark:text-emerald-400"
+   390→                      >
+   391→                        ↓ {netStats.down} KB/s
+   392→                      </Badge>
+   393→                      <Badge
+   394→                        variant="outline"
+   395→                        className="border-teal-500/30 bg-teal-500/10 font-mono text-[11px] text-teal-600 dark:text-teal-400"
+   396→                      >
+   397→                        ↑ {netStats.up} KB/s
+   398→                      </Badge>
+   399→                      <span className="font-mono text-[11px] text-muted-foreground">
+   400→                        peak ↓{netStats.peakDown} · ↑{netStats.peakUp}
+   401→                      </span>
+   402→                    </div>
+   403→                  ) : null}
+   404→                </div>
+   405→                <div className="mt-2 h-28 text-muted-foreground sm:h-32">
+   406→                  <ResponsiveContainer width="100%" height="100%">
+   407→                    <AreaChart data={netChartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+   408→                      <defs>
+   409→                        <linearGradient id="netDownFill" x1="0" y1="0" x2="0" y2="1">
+   410→                          <stop offset="0%" stopColor="#10b981" stopOpacity={0.3} />
+   411→                          <stop offset="100%" stopColor="#10b981" stopOpacity={0.02} />
+   412→                        </linearGradient>
+   413→                        <linearGradient id="netUpFill" x1="0" y1="0" x2="0" y2="1">
+   414→                          <stop offset="0%" stopColor="#14b8a6" stopOpacity={0.3} />
+   415→                          <stop offset="100%" stopColor="#14b8a6" stopOpacity={0.02} />
+   416→                        </linearGradient>
+   417→                      </defs>
+   418→                      <CartesianGrid stroke="#888" strokeOpacity={0.15} vertical={false} />
+   419→                      <XAxis dataKey="i" hide />
+   420→                      <YAxis
+   421→                        width={38}
+   422→                        tick={{ fill: 'currentColor', fontSize: 10 }}
+   423→                        axisLine={false}
+   424→                        tickLine={false}
+   425→                      />
+   426→                      <Tooltip
+   427→                        formatter={(value, name) =>
+   428→                          typeof value === 'number'
+   429→                            ? [`${value.toFixed(1)} KB/s`, name === 'down' ? 'download' : 'upload']
+   430→                            : [String(value), String(name)]
+   431→                        }
+   432→                      />
+   433→                      <Area
+   434→                        type="monotone"
+   435→                        dataKey="down"
+   436→                        name="down"
+   437→                        stroke="#10b981"
+   438→                        strokeWidth={2}
+   439→                        fill="url(#netDownFill)"
+   440→                        connectNulls={false}
+   441→                        dot={false}
+   442→                        isAnimationActive={false}
+   443→                      />
+   444→                      <Area
+   445→                        type="monotone"
+   446→                        dataKey="up"
+   447→                        name="up"
+   448→                        stroke="#14b8a6"
+   449→                        strokeWidth={1.5}
+   450→                        fill="url(#netUpFill)"
+   451→                        connectNulls={false}
+   452→                        dot={false}
+   453→                        isAnimationActive={false}
+   454→                      />
+   455→                    </AreaChart>
+   456→                  </ResponsiveContainer>
+   457→                </div>
+   458→              </div>
+   459→            </div>
+   460→
+   461→            {/* Per-device utilization */}
+   462→            <div className="lg:col-span-2">
+   463→              <p className="mb-2 text-xs font-medium text-muted-foreground">
+   464→                Per-device utilization
+   465→              </p>
+   466→              {metricsDevices.length === 0 ? (
+   467→                onlineDevices.length === 0 ? (
+   468→                  <EmptyState
+   469→                    icon={<MonitorSmartphone className="h-5 w-5" />}
+   470→                    title="No devices online"
+   471→                    hint="Live utilization appears once an agent connects."
+   472→                  />
+   473→                ) : (
+   474→                  <LoadingBlock label="Waiting for agent telemetry…" />
+   475→                )
+   476→              ) : (
+   477→                <div className="scroll-slim flex max-h-64 flex-col gap-2 overflow-y-auto pr-1">
+   478→                  {metricsDevices.map((d) => {
+   479→                    const m = metricsByDevice[d.id]
+   480→                    return (
+   481→                      <div key={d.id} className="glass-inset rounded-xl p-3">
+   482→                        {/* row 1 — hostname gets the full width (no more "HO…") */}
+   483→                        <div className="flex items-center gap-2">
+   484→                          <StatusDot online pulse={false} />
+   485→                          <span
+   486→                            className="min-w-0 flex-1 truncate text-sm font-medium"
+   487→                            title={d.hostname}
+   488→                          >
+   489→                            {d.hostname}
+   490→                          </span>
+   491→                          <span
+   492→                            className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground"
+   493→                            title={`CPU ${m.cpuPercent.toFixed(1)}% · MEM ${m.memoryPercent.toFixed(1)}%`}
+   494→                          >
+   495→                            {Math.round(m.cpuPercent)}% / {Math.round(m.memoryPercent)}%
+   496→                          </span>
+   497→                        </div>
+   498→                        {/* row 2 — labeled bars */}
+   499→                        <div className="mt-2 flex items-center gap-1.5">
+   500→                          <span className="w-7 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+   501→                            cpu
+   502→                          </span>
+   503→                          <Progress
+   504→                            value={Math.min(100, m.cpuPercent)}
+   505→                            className="h-1.5 flex-1"
+   506→                            aria-label={`${d.hostname} CPU`}
+   507→                          />
+   508→                        </div>
+   509→                        <div className="mt-1 flex items-center gap-1.5">
+   510→                          <span className="w-7 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+   511→                            mem
+   512→                          </span>
+   513→                          <Progress
+   514→                            value={Math.min(100, m.memoryPercent)}
+   515→                            className="h-1.5 flex-1"
+   516→                            aria-label={`${d.hostname} memory`}
+   517→                          />
+   518→                        </div>
+   519→                      </div>
+   520→                    )
+   521→                  })}
+   522→                </div>
+   523→              )}
+   524→            </div>
+   525→          </div>
+   526→        </Panel>
+   527→
+   528→        {/* Devices at a glance */}
+   529→        <Panel className="flex flex-col p-4 sm:p-6">
+   530→          <div className="flex items-center justify-between gap-2">
+   531→            <h3 className="text-sm font-semibold">Devices at a glance</h3>
+   532→            <Button
+   533→              variant="ghost"
+   534→              size="sm"
+   535→              className="text-primary"
+   536→              onClick={() => setView('devices')}
+   537→            >
+   538→              View all <ArrowRight className="size-3.5" aria-hidden />
+   539→            </Button>
+   540→          </div>
+   541→          <div className="mt-2 flex flex-1 flex-col gap-1">
+   542→            {glance.length === 0 ? (
+   543→              <LoadingBlock label="Loading devices…" />
+   544→            ) : (
+   545→              glance.map((d) => (
+   546→                <button
+   547→                  key={d.id}
+   548→                  type="button"
+   549→                  onClick={() => {
+   550→                    setSelectedDeviceId(d.id)
+   551→                    setView('devices')
+   552→                  }}
+   553→                  className="flex min-h-[44px] items-center gap-3 rounded-xl px-2 text-left transition-colors hover:bg-primary/10"
+   554→                >
+   555→                  <StatusDot online={d.status === 'online'} />
+   556→                  <span className="min-w-0 flex-1">
+   557→                    <span className="block truncate text-sm font-medium" title={d.hostname}>
+   558→                      {d.hostname}
+   559→                    </span>
+   560→                    <span className="block truncate text-xs text-muted-foreground">
+   561→                      {d.osName}
+   562→                    </span>
+   563→                  </span>
+   564→                  <span
+   565→                    className="hidden shrink-0 text-xs tabular-nums text-muted-foreground sm:block"
+   566→                    title={`last seen ${timeAgo(d.lastSeen)}`}
+   567→                  >
+   568→                    {timeAgoShort(d.lastSeen)} ago
+   569→                  </span>
+   570→                </button>
+   571→              ))
+   572→            )}
+   573→          </div>
+   574→        </Panel>
+   575→      </div>
+   576→
+   577→      {/* Recent activity + active alerts */}
+   578→      <div className="grid gap-4 lg:grid-cols-2">
+   579→        <Panel className="p-4 sm:p-6">
+   580→          <h3 className="text-sm font-semibold">Recent activity</h3>
+   581→          <div className="mt-3">
+   582→            {auditLoading ? (
+   583→              <LoadingBlock label="Loading audit trail…" />
+   584→            ) : auditError ? (
+   585→              <ErrorBlock
+   586→                message={auditError instanceof Error ? auditError.message : 'Failed to load activity'}
+   587→              />
+   588→            ) : !audit || audit.length === 0 ? (
+   589→              <EmptyState
+   590→                icon={<ScrollText className="h-5 w-5" />}
+   591→                title="No activity yet"
+   592→                hint="Audit events appear as you operate the fleet."
+   593→              />
+   594→            ) : (
+   595→              <ul className="flex flex-col gap-0.5">
+   596→                {audit.slice(0, 8).map((a) => (
+   597→                  <li
+   598→                    key={a.id}
+   599→                    className="flex min-h-[40px] items-center gap-3 rounded-lg px-2 transition-colors hover:bg-primary/5"
+   600→                  >
+   601→                    <span
+   602→                      className={cn('h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[a.severity])}
+   603→                      aria-hidden
+   604→                    />
+   605→                    <span className="shrink-0 font-mono text-xs font-medium">{a.action}</span>
+   606→                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+   607→                      {a.detail ?? ''}
+   608→                    </span>
+   609→                    <span className="shrink-0 text-xs text-muted-foreground">
+   610→                      {timeAgo(a.createdAt)}
+   611→                    </span>
+   612→                  </li>
+   613→                ))}
+   614→              </ul>
+   615→            )}
+   616→          </div>
+   617→        </Panel>
+   618→
+   619→        <Panel className="p-4 sm:p-6">
+   620→          <h3 className="text-sm font-semibold">Active alerts</h3>
+   621→          <div className="mt-3">
+   622→            {alertsLoading ? (
+   623→              <LoadingBlock label="Loading alerts…" />
+   624→            ) : alertsError ? (
+   625→              <ErrorBlock
+   626→                message={alertsError instanceof Error ? alertsError.message : 'Failed to load alerts'}
+   627→              />
+   628→            ) : !alerts || alerts.length === 0 ? (
+   629→              <EmptyState
+   630→                icon={<ShieldCheck className="h-5 w-5" />}
+   631→                title="No active alerts"
+   632→                hint="Unacknowledged alerts will show up here."
+   633→              />
+   634→            ) : (
+   635→              <ul className="flex flex-col gap-1.5">
+   636→                {alerts.slice(0, 5).map((al) => (
+   637→                  <li
+   638→                    key={al.id}
+   639→                    className="glass-inset flex min-h-[44px] items-center gap-3 rounded-xl px-3 py-2"
+   640→                    title={al.message}
+   641→                  >
+   642→                    <Badge
+   643→                      variant="outline"
+   644→                      className={cn('shrink-0 capitalize', SEVERITY_BADGE[al.severity])}
+   645→                    >
+   646→                      {al.severity}
+   647→                    </Badge>
+   648→                    <span className="min-w-0 flex-1 truncate text-sm font-medium">
+   649→                      {al.title}
+   650→                    </span>
+   651→                    <span className="shrink-0 text-xs text-muted-foreground">
+   652→                      {timeAgo(al.createdAt)}
+   653→                    </span>
+   654→                  </li>
+   655→                ))}
+   656→              </ul>
+   657→            )}
+   658→          </div>
+   659→        </Panel>
+   660→      </div>
+   661→    </div>
+   662→  )
+   663→}
+   664→

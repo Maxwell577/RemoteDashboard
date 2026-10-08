@@ -36,6 +36,8 @@ export interface Device {
   locationLon: number | null;
   locationLabel: string | null;
   notes: string | null;
+  /** maintenance window — new alerts for this device are suppressed server-side */
+  maintenance: boolean;
 }
 
 export type CommandStatus =

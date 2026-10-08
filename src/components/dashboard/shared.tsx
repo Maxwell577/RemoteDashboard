@@ -194,7 +194,9 @@ export function DeviceSelector({
 
   return (
     <Select
-      value={value ?? undefined}
+      // always a string — keeps the Select controlled for its whole lifetime
+      // (passing `undefined` here flips it uncontrolled → controlled and logs a React warning)
+      value={value ?? '__none'}
       onValueChange={(v) => onChange(v === '__none' ? null : v)}
     >
       <SelectTrigger className={cn('w-full sm:w-[280px]', className)} aria-label="Select device">
@@ -203,11 +205,9 @@ export function DeviceSelector({
         />
       </SelectTrigger>
       <SelectContent className="glass-strong">
-        {value ? (
-          <SelectItem value="__none" className="text-muted-foreground">
-            No device selected
-          </SelectItem>
-        ) : null}
+        <SelectItem value="__none" className="text-muted-foreground">
+          {value ? 'No device selected' : 'Select a device…'}
+        </SelectItem>
         {(devices ?? []).map((d) => (
           <SelectItem key={d.id} value={d.id}>
             <span className="inline-flex items-center gap-2">

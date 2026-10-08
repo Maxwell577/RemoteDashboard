@@ -136,12 +136,18 @@ function NavList({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
                 onClick={() => onNavigate(item.view)}
                 aria-current={active ? 'page' : undefined}
                 className={cn(
-                  'flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3 text-sm font-medium outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring/50',
+                  'relative flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3 text-sm font-medium outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring/50',
                   active
                     ? 'border border-primary/25 bg-primary/15 text-primary shadow-inner'
                     : 'border border-transparent text-muted-foreground hover:bg-primary/10 hover:text-foreground',
                 )}
               >
+                {active ? (
+                  <span
+                    aria-hidden
+                    className="absolute -left-3 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-primary shadow-[0_0_10px] shadow-primary/70"
+                  />
+                ) : null}
                 <Icon className="size-[18px] shrink-0" aria-hidden />
                 <span>{item.label}</span>
                 {item.view === 'alerts' && unread > 0 ? (
@@ -182,7 +188,7 @@ function SidebarFooter() {
     <div className="mt-auto flex flex-col gap-2">
       <HubPill />
       <p className="text-center text-[11px] text-muted-foreground">
-        v0.1.4 • open source
+        v0.1.5 • open source
       </p>
     </div>
   )

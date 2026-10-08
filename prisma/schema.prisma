@@ -38,6 +38,7 @@ model Device {
   locationLon    Float?
   locationLabel  String? // "Manzini, SZ" etc
   notes          String?
+  maintenance    Boolean   @default(false) // maintenance window — alerts suppressed
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
