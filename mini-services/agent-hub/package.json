@@ -1,0 +1,14 @@
+{
+  "name": "agent-hub",
+  "version": "1.2.0",
+  "private": true,
+  "description": "SentraRMM realtime agent hub: socket.io broker + HTTP dispatch + simulated Windows agents",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.4",
+    "socket.io-client": "^4.8.4"
+  }
+}
