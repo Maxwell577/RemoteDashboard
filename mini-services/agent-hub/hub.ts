@@ -244,6 +244,13 @@ export class Hub {
       rec.socketId = null;
       console.log(`[HUB] agent disconnected: ${agentId} (${reason})`);
       this.io.to("dashboard").emit("device:update", { device: { agentId, status: "offline" } });
+      // persist the offline status so the device list doesn't show a ghost
+      // "online" device until the next heartbeat gap
+      void postJson(
+        nextApi("/api/internal/heartbeat"),
+        { agentId, status: "offline" },
+        HUB_HEADERS,
+      );
       void postJson(
         nextApi("/api/internal/alerts"),
         {

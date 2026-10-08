@@ -38,6 +38,23 @@ export function timeAgo(iso?: string | null): string {
   }
 }
 
+/** Compact relative time for tight spaces: "42s", "7m", "3h", "2d" (never "just now"). */
+export function timeAgoShort(iso?: string | null): string {
+  if (!iso) return '—'
+  try {
+    const sec = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000))
+    if (sec < 60) return `${sec}s`
+    const min = Math.floor(sec / 60)
+    if (min < 60) return `${min}m`
+    const h = Math.floor(min / 60)
+    if (h < 24) return `${h}h`
+    const d = Math.floor(h / 24)
+    return `${d}d`
+  } catch {
+    return '—'
+  }
+}
+
 export function fmtDate(iso?: string | null): string {
   if (!iso) return '—'
   try {

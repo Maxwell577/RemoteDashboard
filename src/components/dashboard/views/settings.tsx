@@ -134,6 +134,24 @@ function BrowserSoundRow() {
   )
 }
 
+/**
+ * Browser-local presence sound (device connect / disconnect transitions).
+ * Same localStorage pattern as the alert sound.
+ */
+function PresenceSoundRow() {
+  const presenceSound = useDash((s) => s.presenceSound)
+  const setPresenceSound = useDash((s) => s.setPresenceSound)
+  return (
+    <SwitchRow
+      id="presence-browser-sound"
+      label="Sound on device connect / disconnect"
+      description="rising blip when an agent comes online, falling when it drops — device-local"
+      checked={presenceSound}
+      onChange={setPresenceSound}
+    />
+  )
+}
+
 // ─────────────────────── agent enrollment kit ───────────────────────
 
 function AgentEnrollment({ hubUrl, heartbeatSec }: { hubUrl: string; heartbeatSec: number }) {
@@ -461,6 +479,7 @@ export default function SettingsView() {
             onChange={(v) => update('alertsOnNewDevice', v)}
           />
           <BrowserSoundRow />
+          <PresenceSoundRow />
         </SectionCard>
 
         {/* 3-b. Agent enrollment — wide */}
@@ -543,7 +562,7 @@ export default function SettingsView() {
             </div>
             <div className="min-w-0 flex-1">
               <h3 className="font-semibold leading-tight">
-                About <span className="text-gradient">SentraRMM v0.1.3</span>
+                About <span className="text-gradient">SentraRMM v0.1.4</span>
               </h3>
               <p className="mt-1 text-sm text-muted-foreground">
                 Open-source, authorized-use RMM for your own fleet and security assessments.

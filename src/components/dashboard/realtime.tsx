@@ -1,11 +1,11 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { io, type Socket } from 'socket.io-client'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { useDash } from '@/lib/store'
-import { playAlertSound } from '@/lib/alert-sound'
+import { playAlertSound, playPresenceSound } from '@/lib/alert-sound'
 import type { Alert, Device, DeviceMetrics, ScreenFrame } from '@/lib/types'
 
 /**
@@ -19,6 +19,9 @@ export default function Realtime() {
   const setHubOnline = useDash((s) => s.setHubOnline)
   const bumpUnread = useDash((s) => s.bumpUnreadAlerts)
   const setLiveFrame = useDash((s) => s.setLiveFrame)
+  // last seen online/offline status per device key — used to detect
+  // presence transitions (only events observed while this tab is open)
+  const prevStatus = useRef<Map<string, 'online' | 'offline'>>(new Map())
 
   useEffect(() => {
     const socket: Socket = io('/?XTransformPort=3003', { path: '/' })
@@ -29,8 +32,32 @@ export default function Realtime() {
     })
     socket.on('disconnect', () => setHubOnline(false))
 
-    socket.on('device:update', () => {
+    socket.on('device:update', (p: { device: Device }) => {
+      const d = p?.device
       qc.invalidateQueries({ queryKey: ['devices'] })
+      if (!d || !d.status) return
+      // the offline event is partial ({ agentId, status }) — resolve a
+      // human name from the devices cache when possible
+      const key = d.agentId ?? d.id
+      if (!key) return
+      const prev = prevStatus.current.get(key)
+      prevStatus.current.set(key, d.status)
+      if (prev === d.status) return
+      const cached = qc.getQueryData<Device[]>(['devices'])
+      const known =
+        cached?.find((x) => x.agentId === d.agentId || x.id === d.id) ?? null
+      const hostname = d.hostname ?? known?.hostname ?? d.agentId ?? 'A device'
+      const up = d.status === 'online'
+      if (up) {
+        toast.success(`${hostname} is online`, {
+          description: 'agent connected to the hub',
+        })
+      } else {
+        toast.warning(`${hostname} went offline`, {
+          description: 'agent stopped checking in',
+        })
+      }
+      if (useDash.getState().presenceSound) playPresenceSound(up)
     })
 
     socket.on('metrics:update', (p: { metrics: DeviceMetrics }) => {

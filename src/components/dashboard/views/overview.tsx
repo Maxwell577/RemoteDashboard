@@ -42,10 +42,12 @@ import {
   SectionHeader,
   StatusDot,
   timeAgo,
+  timeAgoShort,
   useDevices,
 } from '../shared'
 
 const CPU_HISTORY = 40 // rolling buffer size (samples)
+const NET_HISTORY = 40
 const SAMPLE_MS = 5000
 
 const SEVERITY_DOT: Record<AuditLog['severity'], string> = {
@@ -139,13 +141,16 @@ export default function Overview() {
   const onlineCount = stats?.onlineDevices ?? onlineDevices.length
   const metricsDevices = onlineDevices.filter((d) => metricsByDevice[d.id] != null)
 
-  // Rolling aggregate-CPU buffer: seeded with nulls so the line starts
-  // rendering once real telemetry arrives. Samples every 5s, reading the
-  // latest devices + metrics from the react-query cache / zustand store.
+  // Rolling aggregate-CPU + fleet network I/O buffers: seeded with nulls so the
+  // lines start rendering once real telemetry arrives. Samples every 5s, reading
+  // the latest devices + metrics from the react-query cache / zustand store.
   const qc = useQueryClient()
   const [cpuSamples, setCpuSamples] = useState<(number | null)[]>(() =>
     Array(CPU_HISTORY).fill(null),
   )
+  const [netSamples, setNetSamples] = useState<
+    { down: number | null; up: number | null }[]
+  >(() => Array.from({ length: NET_HISTORY }, () => ({ down: null, up: null })))
 
   useEffect(() => {
     const sample = () => {
@@ -162,6 +167,17 @@ export default function Overview() {
         ...prev.slice(1),
         avg == null ? null : Math.round(avg * 10) / 10,
       ])
+      // fleet aggregate network I/O (KB/s summed across reporting agents)
+      if (live.length > 0) {
+        const down = live.reduce((acc, d) => acc + metrics[d.id].netDownKBps, 0)
+        const up = live.reduce((acc, d) => acc + metrics[d.id].netUpKBps, 0)
+        setNetSamples((prev) => [
+          ...prev.slice(1),
+          { down: Math.round(down * 10) / 10, up: Math.round(up * 10) / 10 },
+        ])
+      } else {
+        setNetSamples((prev) => [...prev.slice(1), { down: null, up: null }])
+      }
     }
     const id = setInterval(sample, SAMPLE_MS)
     return () => clearInterval(id)
@@ -172,7 +188,12 @@ export default function Overview() {
     [cpuSamples],
   )
 
-  // Chart summary chips — computed from the rolling buffer
+  const netChartData = useMemo(
+    () => netSamples.map((n, i) => ({ i, down: n.down, up: n.up })),
+    [netSamples],
+  )
+
+  // Chart summary chips — computed from the rolling buffers
   const chartStats = useMemo(() => {
     const vals = cpuSamples.filter((v): v is number => v != null)
     if (vals.length === 0) return null
@@ -183,6 +204,20 @@ export default function Overview() {
       samples: vals.length,
     }
   }, [cpuSamples])
+
+  const netStats = useMemo(() => {
+    const downs = netSamples.map((n) => n.down).filter((v): v is number => v != null)
+    const ups = netSamples.map((n) => n.up).filter((v): v is number => v != null)
+    if (downs.length === 0) return null
+    const sum = (arr: number[]) => Math.round(arr.reduce((a, b) => a + b, 0) * 10) / 10
+    return {
+      down: sum(downs),
+      up: sum(ups),
+      peakDown: sum([Math.max(...downs)]),
+      peakUp: sum([Math.max(...ups)]),
+      samples: downs.length,
+    }
+  }, [netSamples])
 
   const glance = deviceList.slice(0, 6)
 
@@ -340,6 +375,87 @@ export default function Overview() {
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
+
+              {/* Fleet network I/O — aggregate down/up across reporting agents */}
+              <div className="mt-4 border-t border-border/40 pt-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Fleet network I/O <span className="text-muted-foreground/60">· KB/s</span>
+                  </p>
+                  {netStats ? (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge
+                        variant="outline"
+                        className="border-emerald-500/30 bg-emerald-500/10 font-mono text-[11px] text-emerald-600 dark:text-emerald-400"
+                      >
+                        ↓ {netStats.down} KB/s
+                      </Badge>
+                      <Badge
+                        variant="outline"
+                        className="border-teal-500/30 bg-teal-500/10 font-mono text-[11px] text-teal-600 dark:text-teal-400"
+                      >
+                        ↑ {netStats.up} KB/s
+                      </Badge>
+                      <span className="font-mono text-[11px] text-muted-foreground">
+                        peak ↓{netStats.peakDown} · ↑{netStats.peakUp}
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="mt-2 h-28 text-muted-foreground sm:h-32">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={netChartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                      <defs>
+                        <linearGradient id="netDownFill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#10b981" stopOpacity={0.3} />
+                          <stop offset="100%" stopColor="#10b981" stopOpacity={0.02} />
+                        </linearGradient>
+                        <linearGradient id="netUpFill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#14b8a6" stopOpacity={0.3} />
+                          <stop offset="100%" stopColor="#14b8a6" stopOpacity={0.02} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid stroke="#888" strokeOpacity={0.15} vertical={false} />
+                      <XAxis dataKey="i" hide />
+                      <YAxis
+                        width={38}
+                        tick={{ fill: 'currentColor', fontSize: 10 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip
+                        formatter={(value, name) =>
+                          typeof value === 'number'
+                            ? [`${value.toFixed(1)} KB/s`, name === 'down' ? 'download' : 'upload']
+                            : [String(value), String(name)]
+                        }
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="down"
+                        name="down"
+                        stroke="#10b981"
+                        strokeWidth={2}
+                        fill="url(#netDownFill)"
+                        connectNulls={false}
+                        dot={false}
+                        isAnimationActive={false}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="up"
+                        name="up"
+                        stroke="#14b8a6"
+                        strokeWidth={1.5}
+                        fill="url(#netUpFill)"
+                        connectNulls={false}
+                        dot={false}
+                        isAnimationActive={false}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
             </div>
 
             {/* Per-device utilization */}
@@ -358,22 +474,48 @@ export default function Overview() {
                   <LoadingBlock label="Waiting for agent telemetry…" />
                 )
               ) : (
-                <div className="scroll-slim flex max-h-56 flex-col gap-2 overflow-y-auto pr-1">
+                <div className="scroll-slim flex max-h-64 flex-col gap-2 overflow-y-auto pr-1">
                   {metricsDevices.map((d) => {
                     const m = metricsByDevice[d.id]
                     return (
                       <div key={d.id} className="glass-inset rounded-xl p-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
-                            <StatusDot online pulse={false} />
-                            <span className="truncate">{d.hostname}</span>
+                        {/* row 1 — hostname gets the full width (no more "HO…") */}
+                        <div className="flex items-center gap-2">
+                          <StatusDot online pulse={false} />
+                          <span
+                            className="min-w-0 flex-1 truncate text-sm font-medium"
+                            title={d.hostname}
+                          >
+                            {d.hostname}
                           </span>
-                          <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                            CPU {Math.round(m.cpuPercent)}% · MEM {Math.round(m.memoryPercent)}%
+                          <span
+                            className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground"
+                            title={`CPU ${m.cpuPercent.toFixed(1)}% · MEM ${m.memoryPercent.toFixed(1)}%`}
+                          >
+                            {Math.round(m.cpuPercent)}% / {Math.round(m.memoryPercent)}%
                           </span>
                         </div>
-                        <Progress value={Math.min(100, m.cpuPercent)} className="mt-2 h-1.5" />
-                        <Progress value={Math.min(100, m.memoryPercent)} className="mt-1.5 h-1.5" />
+                        {/* row 2 — labeled bars */}
+                        <div className="mt-2 flex items-center gap-1.5">
+                          <span className="w-7 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            cpu
+                          </span>
+                          <Progress
+                            value={Math.min(100, m.cpuPercent)}
+                            className="h-1.5 flex-1"
+                            aria-label={`${d.hostname} CPU`}
+                          />
+                        </div>
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <span className="w-7 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            mem
+                          </span>
+                          <Progress
+                            value={Math.min(100, m.memoryPercent)}
+                            className="h-1.5 flex-1"
+                            aria-label={`${d.hostname} memory`}
+                          />
+                        </div>
                       </div>
                     )
                   })}
@@ -412,13 +554,18 @@ export default function Overview() {
                 >
                   <StatusDot online={d.status === 'online'} />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">{d.hostname}</span>
+                    <span className="block truncate text-sm font-medium" title={d.hostname}>
+                      {d.hostname}
+                    </span>
                     <span className="block truncate text-xs text-muted-foreground">
                       {d.osName}
                     </span>
                   </span>
-                  <span className="hidden shrink-0 text-xs text-muted-foreground sm:block">
-                    {timeAgo(d.lastSeen)}
+                  <span
+                    className="hidden shrink-0 text-xs tabular-nums text-muted-foreground sm:block"
+                    title={`last seen ${timeAgo(d.lastSeen)}`}
+                  >
+                    {timeAgoShort(d.lastSeen)} ago
                   </span>
                 </button>
               ))

@@ -182,6 +182,26 @@
     0 12px 40px oklch(0 0 0 / 45%);
 }
 
+/* Floating overlay panels (popovers, dropdowns) — like glass-strong but
+   more opaque so page content never bleeds through and hurts readability. */
+.glass-overlay {
+  background: oklch(1 0 0 / 92%);
+  backdrop-filter: blur(28px) saturate(1.7);
+  -webkit-backdrop-filter: blur(28px) saturate(1.7);
+  border: 1px solid oklch(1 0 0 / 80%);
+  box-shadow:
+    0 1px 0 0 oklch(1 0 0 / 70%) inset,
+    0 18px 50px oklch(0.3 0.03 180 / 18%);
+}
+
+.dark .glass-overlay {
+  background: oklch(0.29 0.016 178 / 92%);
+  border: 1px solid oklch(1 0 0 / 14%);
+  box-shadow:
+    0 1px 0 0 oklch(1 0 0 / 10%) inset,
+    0 18px 50px oklch(0 0 0 / 55%);
+}
+
 .glass-inset {
   background: oklch(0.55 0.02 180 / 7%);
   border: 1px solid oklch(0.5 0.02 180 / 12%);

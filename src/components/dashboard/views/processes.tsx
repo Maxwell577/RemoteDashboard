@@ -26,6 +26,7 @@ import { useDash } from '@/lib/store'
 import {
   EmptyState,
   ErrorBlock,
+  DeviceSelector,
   LoadingBlock,
   Panel,
   SectionHeader,
@@ -169,6 +170,7 @@ function SortHead({
 export default function Processes() {
   const qc = useQueryClient()
   const selectedDeviceId = useDash((s) => s.selectedDeviceId)
+  const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
   const storeMetrics = useDash((s) => (selectedDeviceId ? s.metricsByDevice[selectedDeviceId] : undefined))
   const setMetrics = useDash((s) => s.setMetrics)
   const { data: devices } = useDevices()
@@ -309,11 +311,16 @@ export default function Processes() {
       {header}
 
       {!selectedDeviceId ? (
-        <EmptyState
-          icon={<Cpu className="h-10 w-10" />}
-          title="Select a device to view processes"
-          hint="Pick a machine to see its live process table and control actions."
-        />
+        <>
+          <EmptyState
+            icon={<Cpu className="h-10 w-10" />}
+            title="Select a device to view processes"
+            hint="Pick a machine to see its live process table and control actions."
+          />
+          <div className="flex justify-center">
+            <DeviceSelector value={selectedDeviceId} onChange={setSelectedDeviceId} />
+          </div>
+        </>
       ) : (
         <>
           {/* summary chips */}

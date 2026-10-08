@@ -50,9 +50,13 @@ interface DashState {
   /** audible blip on new realtime alerts (persisted to localStorage) */
   alertSound: boolean
   setAlertSound: (v: boolean) => void
+  /** audible blip when a device connects or disconnects (persisted) */
+  presenceSound: boolean
+  setPresenceSound: (v: boolean) => void
 }
 
 const ALERT_SOUND_KEY = 'sentrarmm.alertSound'
+const PRESENCE_SOUND_KEY = 'sentrarmm.presenceSound'
 
 function initialAlertSound(): boolean {
   if (typeof window === 'undefined') return true
@@ -60,6 +64,15 @@ function initialAlertSound(): boolean {
     return window.localStorage.getItem(ALERT_SOUND_KEY) !== 'off'
   } catch {
     return true
+  }
+}
+
+function initialPresenceSound(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.localStorage.getItem(PRESENCE_SOUND_KEY) === 'on'
+  } catch {
+    return false
   }
 }
 
@@ -100,5 +113,16 @@ export const useDash = create<DashState>((set) => ({
       // storage unavailable (private mode) — in-memory only
     }
     set({ alertSound })
+  },
+  presenceSound: initialPresenceSound(),
+  setPresenceSound: (presenceSound) => {
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(PRESENCE_SOUND_KEY, presenceSound ? 'on' : 'off')
+      }
+    } catch {
+      // storage unavailable (private mode) — in-memory only
+    }
+    set({ presenceSound })
   },
 }))

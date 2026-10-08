@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   Camera,
@@ -13,9 +13,12 @@ import {
   MapPin,
   Monitor,
   MonitorSmartphone,
+  Search,
   Server,
   SquareTerminal,
+  Tag,
   Timer,
+  X,
   type LucideIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -23,6 +26,7 @@ import { api, computeHealthScore, type Device, type DeviceType, type MediaAsset 
 import { useDash, type ViewId } from '@/lib/store'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   Dialog,
   DialogContent,
@@ -624,12 +628,79 @@ function DeviceCard({ device }: { device: Device }) {
 
 // ──────────────────────────── devices view ──────────────────────────
 
+type StatusFilter = 'all' | 'online' | 'offline'
+
+function StatusFilterPill({
+  active,
+  label,
+  count,
+  onClick,
+}: {
+  active: boolean
+  label: string
+  count: number
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        'glass-inset inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-all',
+        active
+          ? 'border border-primary/30 bg-primary/15 text-primary shadow-inner'
+          : 'text-muted-foreground hover:bg-primary/10 hover:text-foreground',
+      )}
+    >
+      {label}
+      <span className="font-mono tabular-nums opacity-70">{count}</span>
+    </button>
+  )
+}
+
 export default function Devices() {
   const { data: devices, isLoading, error } = useDevices()
+
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
 
   const deviceList = devices ?? []
   const onlineCount = deviceList.filter((d) => d.status === 'online').length
   const offlineCount = deviceList.length - onlineCount
+
+  // every distinct tag in the fleet, alphabetical
+  const allTags = useMemo(() => {
+    const s = new Set<string>()
+    for (const d of deviceList) for (const t of d.tags) s.add(t)
+    return [...s].sort((a, b) => a.localeCompare(b))
+  }, [deviceList])
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return deviceList.filter((d) => {
+      if (statusFilter !== 'all' && d.status !== statusFilter) return false
+      if (tagFilter && !d.tags.includes(tagFilter)) return false
+      if (!q) return true
+      return (
+        d.hostname.toLowerCase().includes(q) ||
+        (d.friendlyName ?? '').toLowerCase().includes(q) ||
+        d.osName.toLowerCase().includes(q) ||
+        d.cpuModel?.toLowerCase().includes(q) ||
+        d.ipAddress?.toLowerCase().includes(q) ||
+        d.localIp?.toLowerCase().includes(q) ||
+        d.tags.some((t) => t.toLowerCase().includes(q))
+      )
+    })
+  }, [deviceList, search, statusFilter, tagFilter])
+
+  const filtersActive = search.trim() !== '' || statusFilter !== 'all' || tagFilter !== null
+  const clearFilters = () => {
+    setSearch('')
+    setStatusFilter('all')
+    setTagFilter(null)
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -716,6 +787,97 @@ export default function Devices() {
         }
       />
 
+      {/* Filter toolbar — search / status / tags */}
+      {!isLoading && !error && deviceList.length > 0 ? (
+        <Panel className="card-sheen relative overflow-hidden p-3">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -left-10 -top-10 h-28 w-28 rounded-full bg-primary/5 blur-2xl"
+          />
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* search */}
+              <div className="relative min-w-0 flex-1 sm:max-w-xs">
+                <Search
+                  className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+                  aria-hidden
+                />
+                <Input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search hostname, OS, IP, tag…"
+                  className="h-9 pl-8"
+                  aria-label="Search devices"
+                />
+              </div>
+              {/* status pills */}
+              <div
+                className="flex items-center gap-1.5"
+                role="group"
+                aria-label="Filter by status"
+              >
+                <StatusFilterPill
+                  active={statusFilter === 'all'}
+                  label="All"
+                  count={deviceList.length}
+                  onClick={() => setStatusFilter('all')}
+                />
+                <StatusFilterPill
+                  active={statusFilter === 'online'}
+                  label="Online"
+                  count={onlineCount}
+                  onClick={() => setStatusFilter('online')}
+                />
+                <StatusFilterPill
+                  active={statusFilter === 'offline'}
+                  label="Offline"
+                  count={offlineCount}
+                  onClick={() => setStatusFilter('offline')}
+                />
+              </div>
+              {filtersActive ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-9 gap-1.5 text-muted-foreground"
+                  onClick={clearFilters}
+                >
+                  <X className="size-3.5" aria-hidden />
+                  Clear
+                </Button>
+              ) : null}
+            </div>
+            {allTags.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Tag
+                  className="mr-0.5 size-3.5 text-muted-foreground"
+                  aria-hidden
+                />
+                {allTags.map((t) => {
+                  const active = tagFilter === t
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setTagFilter(active ? null : t)}
+                      className={cn(
+                        'rounded-full border px-2.5 py-1 text-[11px] font-medium transition-all',
+                        active
+                          ? 'border-primary/40 bg-primary/15 text-primary shadow-inner'
+                          : 'border-border/60 bg-background/40 text-muted-foreground hover:border-primary/30 hover:bg-primary/10 hover:text-foreground',
+                      )}
+                    >
+                      {t}
+                    </button>
+                  )
+                })}
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+      ) : null}
+
       {isLoading ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -732,12 +894,31 @@ export default function Devices() {
           title="No devices enrolled"
           hint="Start an agent to register your first machine."
         />
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          icon={<Search className="h-8 w-8" />}
+          title="No devices match your filters"
+          hint={
+            filtersActive
+              ? 'Try a different search term, status or tag.'
+              : undefined
+          }
+        />
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {deviceList.map((d) => (
-            <DeviceCard key={d.id} device={d} />
-          ))}
-        </div>
+        <>
+          {filtersActive ? (
+            <p className="text-xs text-muted-foreground" aria-live="polite">
+              showing{' '}
+              <span className="font-semibold text-foreground">{filtered.length}</span> of{' '}
+              {deviceList.length} devices
+            </p>
+          ) : null}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {filtered.map((d) => (
+              <DeviceCard key={d.id} device={d} />
+            ))}
+          </div>
+        </>
       )}
     </div>
   )

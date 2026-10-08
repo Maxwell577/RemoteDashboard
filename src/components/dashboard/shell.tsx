@@ -21,7 +21,7 @@ import {
   VolumeX,
   type LucideIcon,
 } from 'lucide-react'
-import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useDash, type ViewId } from '@/lib/store'
@@ -31,6 +31,7 @@ import Realtime from './realtime'
 import ThemeToggle from './theme-toggle'
 import CommandPalette from './command-palette'
 import ShortcutsDialog, { HOTKEY_VIEWS } from './shortcuts-dialog'
+import NotificationCenter from './notification-center'
 import { Kbd, ModKey } from './kbd'
 import Overview from './views/overview'
 import Devices from './views/devices'
@@ -181,7 +182,7 @@ function SidebarFooter() {
     <div className="mt-auto flex flex-col gap-2">
       <HubPill />
       <p className="text-center text-[11px] text-muted-foreground">
-        v0.1.3 • open source
+        v0.1.4 • open source
       </p>
     </div>
   )
@@ -193,7 +194,6 @@ export default function DashboardShell() {
   const view = useDash((s) => s.view)
   const setView = useDash((s) => s.setView)
   const hubOnline = useDash((s) => s.hubOnline)
-  const unread = useDash((s) => s.unreadAlerts)
   const setPaletteOpen = useDash((s) => s.setPaletteOpen)
   const alertSound = useDash((s) => s.alertSound)
   const setAlertSound = useDash((s) => s.setAlertSound)
@@ -304,20 +304,7 @@ export default function DashboardShell() {
               </span>
             </div>
 
-            <Button
-              variant="ghost"
-              size="icon"
-              className="relative size-11"
-              aria-label={`Alerts${unread > 0 ? ` (${unread} unread)` : ''}`}
-              onClick={() => setView('alerts')}
-            >
-              <Bell className="size-[18px]" aria-hidden />
-              {unread > 0 ? (
-                <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-none text-white">
-                  {unread > 99 ? '99+' : unread}
-                </span>
-              ) : null}
-            </Button>
+            <NotificationCenter />
 
             <Button
               variant="ghost"
@@ -363,6 +350,9 @@ export default function DashboardShell() {
       <Sheet open={navOpen} onOpenChange={setNavOpen}>
         <SheetContent side="left" className="glass-strong w-[280px]">
           <SheetTitle className="sr-only">SentraRMM navigation</SheetTitle>
+          <SheetDescription className="sr-only">
+            Switch between dashboard views
+          </SheetDescription>
           <div className="scroll-slim flex h-full flex-col gap-5 overflow-y-auto p-4 pt-8">
             <Brand />
             <NavList onNavigate={navigate} />

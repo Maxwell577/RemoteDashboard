@@ -65,3 +65,23 @@ export function playAlertSound(
     // audio is best-effort — never break the UI over a beep
   }
 }
+
+/**
+ * Presence blips for device connect/disconnect transitions.
+ * up = rising fifth (agent came online), down = falling minor third (agent left).
+ */
+export function playPresenceSound(up: boolean): void {
+  const ac = getCtx();
+  if (!ac) return;
+  try {
+    if (up) {
+      beep(ac, 440, 0, 0.08);
+      beep(ac, 660, 0.11, 0.11);
+    } else {
+      beep(ac, 494, 0, 0.08);
+      beep(ac, 415, 0.11, 0.13);
+    }
+  } catch {
+    // audio is best-effort — never break the UI over a beep
+  }
+}
