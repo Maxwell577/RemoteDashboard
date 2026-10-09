@@ -19,6 +19,7 @@ import {
   Plus,
   RotateCcw,
   Siren,
+  Tag,
   Trash2,
   type LucideIcon,
 } from 'lucide-react'
@@ -82,6 +83,8 @@ interface DraftRule {
   threshold: number
   severity: AlertRule['severity']
   cooldownMin: number
+  /** '' = all devices; otherwise only devices carrying this tag */
+  deviceTag: string
 }
 
 const EMPTY_DRAFT: DraftRule = {
@@ -91,6 +94,7 @@ const EMPTY_DRAFT: DraftRule = {
   threshold: 80,
   severity: 'warning',
   cooldownMin: 15,
+  deviceTag: '',
 }
 
 // ───────────────────────── rule editor dialog ────────────────────────
@@ -101,12 +105,14 @@ function RuleDialog({
   initial,
   onSubmit,
   editing,
+  knownTags,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
   initial: DraftRule
   editing: boolean
   onSubmit: (d: DraftRule) => void
+  knownTags: string[]
 }) {
   // keyed remount re-seeds the draft from props on every open/edit target
   // change (avoids setState-in-effect sync)
@@ -129,6 +135,7 @@ function RuleDialog({
             onSubmit={onSubmit}
             onCancel={() => onOpenChange(false)}
             editing={editing}
+            knownTags={knownTags}
           />
         </DialogContent>
       ) : null}
@@ -141,11 +148,13 @@ function RuleForm({
   onSubmit,
   onCancel,
   editing,
+  knownTags,
 }: {
   initial: DraftRule
   onSubmit: (d: DraftRule) => void
   onCancel: () => void
   editing: boolean
+  knownTags: string[]
 }) {
   const [draft, setDraft] = useState<DraftRule>(initial)
   const valid = draft.name.trim().length > 0 && draft.threshold >= 0 && draft.threshold <= 100
@@ -252,6 +261,33 @@ function RuleForm({
             />
           </div>
         </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label className="text-xs uppercase tracking-wide text-muted-foreground">
+            Applies to
+          </Label>
+          <Select
+            value={draft.deviceTag || '__all'}
+            onValueChange={(v) => setDraft((d) => ({ ...d, deviceTag: v === '__all' ? '' : v }))}
+          >
+            <SelectTrigger aria-label="Rule scope">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="glass-strong">
+              <SelectItem value="__all">All devices</SelectItem>
+              {knownTags.map((t) => (
+                <SelectItem key={t} value={t}>
+                  tag: {t}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-[11px] text-muted-foreground">
+            {draft.deviceTag
+              ? `Only devices tagged “${draft.deviceTag}” are evaluated against this rule.`
+              : 'Every online device is evaluated against this rule.'}
+          </p>
+        </div>
       </div>
 
       <DialogFooter className="gap-2">
@@ -327,10 +363,17 @@ export default function AlertRulesSettings({
     setRules((prev) => {
       const base = prev ?? []
       if (editingId) {
-        return base.map((r) => (r.id === editingId ? { ...r, ...draft } : r))
+        return base.map((r) =>
+          r.id === editingId
+            ? { ...r, ...draft, deviceTag: draft.deviceTag || null }
+            : r,
+        )
       }
       const id = `rule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-      return [...base, { id, enabled: true, ...draft }]
+      return [
+        ...base,
+        { id, enabled: true, ...draft, deviceTag: draft.deviceTag || null },
+      ]
     })
   }
 
@@ -352,7 +395,12 @@ export default function AlertRulesSettings({
   async function evaluateNow() {
     const entries = (devices ?? [])
       .filter((d) => d.status === 'online' && metricsByDevice[d.id])
-      .map((d) => ({ ...metricsByDevice[d.id], deviceId: d.id, hostname: d.hostname }))
+      .map((d) => ({
+        ...metricsByDevice[d.id],
+        deviceId: d.id,
+        hostname: d.hostname,
+        tags: d.tags,
+      }))
     if (entries.length === 0) {
       toast.info('No live telemetry to evaluate', {
         description: 'Wait for a device heartbeat, then try again.',
@@ -393,6 +441,13 @@ export default function AlertRulesSettings({
   const busy = saving || rulesQuery.isLoading
 
   const list = useMemo(() => rules ?? [], [rules])
+
+  // every tag known across the fleet — feeds the rule "Applies to" scope picker
+  const knownTags = useMemo(() => {
+    const s = new Set<string>()
+    for (const d of devices ?? []) for (const t of d.tags) s.add(t)
+    return [...s].sort((a, b) => a.localeCompare(b))
+  }, [devices])
 
   return (
     <Panel className="card-sheen glass-hover relative overflow-hidden p-6">
@@ -467,6 +522,16 @@ export default function AlertRulesSettings({
                       {describeRule(rule)} · cooldown {rule.cooldownMin} min
                     </p>
                   </div>
+                  {rule.deviceTag ? (
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 gap-1 border-teal-500/30 bg-teal-500/10 text-[10px] text-teal-600 dark:text-teal-400"
+                      title={`Scoped to devices tagged “${rule.deviceTag}”`}
+                    >
+                      <Tag className="size-3" aria-hidden />
+                      {rule.deviceTag}
+                    </Badge>
+                  ) : null}
                   <Badge
                     variant="outline"
                     className={cn('shrink-0 text-[10px] capitalize', severityBadgeClass(rule.severity))}
@@ -561,6 +626,7 @@ export default function AlertRulesSettings({
                       threshold: r.threshold,
                       severity: r.severity,
                       cooldownMin: r.cooldownMin,
+                      deviceTag: r.deviceTag ?? '',
                     }
                   : EMPTY_DRAFT
               })()
@@ -568,6 +634,7 @@ export default function AlertRulesSettings({
         }
         editing={editingId !== null}
         onSubmit={upsertRule}
+        knownTags={knownTags}
       />
     </Panel>
   )

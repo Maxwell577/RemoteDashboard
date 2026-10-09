@@ -17,6 +17,7 @@ interface EvaluateEntry {
   cpu?: unknown;
   memory?: unknown;
   disk?: unknown;
+  tags?: unknown;
 }
 
 function numOrNull(v: unknown): number | null {
@@ -45,6 +46,9 @@ export async function POST(req: NextRequest) {
         cpuPercent: numOrNull(raw?.cpu),
         memoryPercent: numOrNull(raw?.memory),
         diskPercent: numOrNull(raw?.disk),
+        tags: Array.isArray(raw?.tags)
+          ? (raw.tags as unknown[]).filter((t): t is string => typeof t === "string")
+          : [],
       };
       const created = await evaluateRulesForDevice(entry, rules, settings.alertRulesEnabled);
       fired.push(...created);

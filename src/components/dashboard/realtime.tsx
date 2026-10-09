@@ -17,7 +17,6 @@ export default function Realtime() {
   const qc = useQueryClient()
   const setMetrics = useDash((s) => s.setMetrics)
   const setHubOnline = useDash((s) => s.setHubOnline)
-  const bumpUnread = useDash((s) => s.bumpUnreadAlerts)
   const setLiveFrame = useDash((s) => s.setLiveFrame)
   // last seen online/offline status per device key — used to detect
   // presence transitions (only events observed while this tab is open)
@@ -92,8 +91,9 @@ export default function Realtime() {
       else if (a.severity === 'warning') toast.warning(a.title, { description: a.message })
       else toast.info(a.title, { description: a.message })
       if (useDash.getState().alertSound) playAlertSound(a.severity)
+      // unread badges (bell + alerts nav pill) derive from the alerts cache
+      // + the server-side read timestamp — invalidating is enough
       qc.invalidateQueries({ queryKey: ['alerts'] })
-      bumpUnread()
     })
 
     // Live screen viewer stream — frames arrive keyed by agentId; also store
@@ -109,7 +109,7 @@ export default function Realtime() {
     return () => {
       socket.close()
     }
-  }, [qc, setMetrics, setHubOnline, bumpUnread, setLiveFrame])
+  }, [qc, setMetrics, setHubOnline, setLiveFrame])
 
   // poll hub status every 30s
   useEffect(() => {

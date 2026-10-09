@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState, type ReactNode } from 'react'
+import { useId, useMemo, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowDownWideNarrow,
@@ -31,7 +31,7 @@ import { api, computeHealthScore, type Device, type DeviceType, type MediaAsset 
 import { useDash, type DeviceSort, type ViewId } from '@/lib/store'
 import DeviceActivity from '../device-activity'
 import { TelemetryChart } from '../telemetry-chart'
-import { useTelemetryHistory } from '@/hooks/use-telemetry-history'
+import { useTelemetryHistory, useTelemetrySparklines } from '@/hooks/use-telemetry-history'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -52,7 +52,9 @@ import { cn } from '@/lib/utils'
 import {
   EmptyState,
   ErrorBlock,
+  HIST_RANGES,
   Panel,
+  RangePicker,
   SectionHeader,
   StatusDot,
   fmtBytes,
@@ -215,11 +217,13 @@ function CpuSparkline({ history, className }: { history: number[]; className?: s
 }
 
 /**
- * DB-backed 30-minute utilization chart for one device (details dialog).
- * Falls back to an informative empty state for offline / fresh devices.
+ * DB-backed utilization chart for one device (details dialog) with a local
+ * window picker (5 m … 2 h). Falls back to an informative empty state for
+ * offline / fresh devices.
  */
 function DeviceUtilizationChart({ deviceId, online }: { deviceId: string; online: boolean }) {
-  const { data, loading, error } = useTelemetryHistory({ deviceId, minutes: 30 })
+  const [range, setRange] = useState(30)
+  const { data, loading, error } = useTelemetryHistory({ deviceId, minutes: range })
   if (error) {
     return <ErrorBlock message={`History unavailable — ${error}`} />
   }
@@ -235,14 +239,25 @@ function DeviceUtilizationChart({ deviceId, online }: { deviceId: string; online
     )
   }
   return (
-    <TelemetryChart
-      data={data}
-      metrics={['cpu', 'memory']}
-      height={140}
-      showLegend={false}
-      ariaLabel="Device utilization for the last 30 minutes"
-      className="glass-inset rounded-xl p-1.5"
-    />
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-end">
+        <RangePicker
+          value={range}
+          onChange={setRange}
+          options={HIST_RANGES}
+          label="Device utilization window"
+          className="scale-95"
+        />
+      </div>
+      <TelemetryChart
+        data={data}
+        metrics={['cpu', 'memory']}
+        height={140}
+        showLegend={false}
+        ariaLabel={`Device utilization for the last ${range} minutes`}
+        className="glass-inset rounded-xl p-1.5"
+      />
+    </div>
   )
 }
 
@@ -250,6 +265,66 @@ function healthTone(score: number): string {
   if (score >= 80) return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
   if (score >= 55) return 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
   return 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+}
+
+/**
+ * Ultra-compact CPU sparkline strip for the DeviceCard — gradient area fill
+ * with a soft glow on the last point. Unique gradient id per instance
+ * (useId) so multiple cards never collide.
+ */
+function MiniSparkline({ values, className }: { values: number[]; className?: string }) {
+  const id = useId()
+  const w = 120
+  const h = 30
+  if (values.length < 2) {
+    return (
+      <div
+        className={cn('flex items-center text-[10px] text-muted-foreground/70', className)}
+        style={{ height: h }}
+      >
+        building trend…
+      </div>
+    )
+  }
+  const pts = values.map((v, i) => {
+    const x = (i / (values.length - 1)) * w
+    const y = h - (Math.min(100, Math.max(0, v)) / 100) * (h - 8) - 4
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  })
+  const last = values[values.length - 1]
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      className={cn('w-full', className)}
+      style={{ height: h }}
+      role="img"
+      aria-label={`CPU trend over the last 15 minutes, currently ${Math.round(last)} percent`}
+    >
+      <defs>
+        <linearGradient id={`spark-${id}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="currentColor" stopOpacity="0.35" />
+          <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      <polygon points={`0,${h} ${pts.join(' ')} ${w},${h}`} fill={`url(#spark-${id})`} />
+      <polyline
+        points={pts.join(' ')}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        opacity="0.9"
+      />
+      <circle
+        cx={w}
+        cy={h - (Math.min(100, Math.max(0, last)) / 100) * (h - 8) - 4}
+        r="2.5"
+        className="fill-current"
+        opacity="0.95"
+      />
+    </svg>
+  )
 }
 
 // ───────────────────────── details dialog body ──────────────────────
@@ -426,7 +501,7 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
         )}
       </DetailSection>
 
-      <DetailSection title="Utilization — 30 min">
+      <DetailSection title="Utilization — window">
         <DeviceUtilizationChart deviceId={device.id} online={device.status === 'online'} />
       </DetailSection>
 
@@ -575,12 +650,15 @@ function DeviceCard({
   selectMode,
   selected,
   onToggleSelect,
+  spark,
 }: {
   device: Device
   index: number
   selectMode: boolean
   selected: boolean
   onToggleSelect: (id: string) => void
+  /** recent cpu values (oldest → newest) for the card trend strip */
+  spark?: number[]
 }) {
   const setView = useDash((s) => s.setView)
   const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
@@ -763,6 +841,25 @@ function DeviceCard({
           </div>
         ) : null}
 
+        {online ? (
+          <div className="mt-3 flex items-center gap-2.5 rounded-xl border border-border/40 bg-background/30 px-2.5 py-1.5">
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              cpu·15m
+            </span>
+            <div className="min-w-0 flex-1 text-primary">
+              <MiniSparkline values={spark ?? []} />
+            </div>
+            {spark && spark.length >= 2 ? (
+              <span
+                className="shrink-0 rounded-md border border-primary/25 bg-primary/10 px-1.5 py-px font-mono text-[10px] font-semibold tabular-nums text-primary"
+                title="current CPU %"
+              >
+                {Math.round(spark[spark.length - 1])}%
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="mt-4 flex items-center gap-2 border-t border-border/50 pt-3">
           <Button size="sm" className="flex-1" onClick={() => go('terminal')}>
             <SquareTerminal className="size-3.5" aria-hidden /> Manage
@@ -911,6 +1008,9 @@ export default function Devices() {
       return pa !== pb ? pa - pb : byKey(a, b)
     })
   }, [filtered, deviceSort, pinnedDevices, metricsByDevice])
+
+  // shared 15-minute CPU series — one query powers every card's trend strip
+  const { series: sparkSeries } = useTelemetrySparklines({ minutes: 15 })
 
   const filtersActive = search.trim() !== '' || statusFilter !== 'all' || tagFilter !== null
   const clearFilters = () => {
@@ -1243,6 +1343,7 @@ export default function Devices() {
                 selectMode={selectMode}
                 selected={selectedIds.includes(d.id)}
                 onToggleSelect={toggleSelect}
+                spark={sparkSeries[d.id]}
               />
             ))}
           </div>

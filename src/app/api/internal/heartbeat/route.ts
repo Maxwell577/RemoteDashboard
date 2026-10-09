@@ -61,7 +61,7 @@ export async function POST(req: NextRequest) {
       try {
         const device = await db.device.findUnique({
           where: { agentId: body.agentId },
-          select: { id: true, hostname: true },
+          select: { id: true, hostname: true, tags: true },
         });
         if (device) {
           const cpu = numOrNull((m as Record<string, unknown>).cpuPercent);
@@ -85,6 +85,16 @@ export async function POST(req: NextRequest) {
           }
 
           const [rules, settings] = await Promise.all([getAlertRules(), getAppSettings()]);
+          // parse the raw JSON tags column for tag-scoped rules
+          let tags: string[] = [];
+          try {
+            const parsed: unknown = JSON.parse(device.tags ?? "[]");
+            if (Array.isArray(parsed)) {
+              tags = parsed.filter((t): t is string => typeof t === "string");
+            }
+          } catch {
+            tags = [];
+          }
           const created = await evaluateRulesForDevice(
             {
               deviceId: device.id,
@@ -92,6 +102,7 @@ export async function POST(req: NextRequest) {
               cpuPercent: cpu,
               memoryPercent: memory,
               diskPercent: disk,
+              tags,
             },
             rules,
             settings.alertRulesEnabled,

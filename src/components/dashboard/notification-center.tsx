@@ -16,6 +16,7 @@ import { toast } from 'sonner'
 import { api, type Alert } from '@/lib/types'
 import { useDash } from '@/lib/store'
 import { useAlerts } from './shared'
+import { useUnreadAlerts } from '@/hooks/use-unread-alerts'
 import { cn } from '@/lib/utils'
 import { useMounted } from '@/hooks/use-mounted'
 import { Badge } from '@/components/ui/badge'
@@ -61,8 +62,9 @@ export default function NotificationCenter() {
   const { data: alertsData } = useAlerts(100)
   const alerts = alertsData ?? []
   const unack = alerts.filter((a) => !a.acknowledged)
-  const unread = useDash((s) => s.unreadAlerts)
-  const clearUnread = useDash((s) => s.clearUnreadAlerts)
+  // server-synced unread state — persisted under Setting "notifyReadAt" so
+  // marking read in one browser clears the badge everywhere
+  const { unread, markRead } = useUnreadAlerts()
   const setView = useDash((s) => s.setView)
 
   const ack = useMutation({
@@ -101,8 +103,9 @@ export default function NotificationCenter() {
   const openPanel = (next: boolean) => {
     setOpen(next)
     if (next) {
-      // opening the panel = the operator has seen the badge
-      clearUnread()
+      // opening the panel = the operator has seen the badge (server-side,
+      // optimistic — see useUnreadAlerts)
+      markRead()
     }
   }
 

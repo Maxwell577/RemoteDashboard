@@ -33,6 +33,7 @@ import CommandPalette from './command-palette'
 import ShortcutsDialog, { HOTKEY_VIEWS } from './shortcuts-dialog'
 import NotificationCenter from './notification-center'
 import { useMounted } from '@/hooks/use-mounted'
+import { useUnreadAlerts } from '@/hooks/use-unread-alerts'
 import { Kbd, ModKey } from './kbd'
 import Overview from './views/overview'
 import Devices from './views/devices'
@@ -118,7 +119,8 @@ function Brand() {
 
 function NavList({ onNavigate }: { onNavigate: (v: ViewId) => void }) {
   const view = useDash((s) => s.view)
-  const unread = useDash((s) => s.unreadAlerts)
+  // server-synced unread alerts (same source as the topbar bell)
+  const { unread } = useUnreadAlerts()
 
   return (
     <nav className="flex flex-col gap-4" aria-label="Dashboard sections">
@@ -198,7 +200,7 @@ function SidebarFooter() {
     <div className="mt-auto flex flex-col gap-2">
       <HubPill />
       <p className="text-center text-[11px] text-muted-foreground">
-        v0.1.8 • open source
+        v0.1.9 • open source
       </p>
     </div>
   )
@@ -220,6 +222,13 @@ export default function DashboardShell() {
   // Dialog subtrees otherwise render an sr-only header into the SSR HTML even
   // when closed, which was the source of a flaky useId hydration mismatch.
   const mounted = useMounted()
+
+  // Pull persisted UI prefs from localStorage AFTER mount — reading them into
+  // the initial store state desynced SSR from the client hydration pass
+  // (server always renders the defaults).
+  useEffect(() => {
+    useDash.getState().hydratePrefs()
+  }, [])
 
   // Global hotkeys: Alt+1…9/0 switch views, "?" opens the shortcuts dialog.
   // Alt-combos work even while typing (they can't insert text); the plain

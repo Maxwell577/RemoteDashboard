@@ -150,6 +150,89 @@ export function EmptyState({
   )
 }
 
+/** One selectable segment of the RangePicker. */
+export interface RangeOption {
+  value: number
+  label: string
+  /** accessible label (e.g. "Show the last 30 minutes") */
+  title?: string
+}
+
+/** Utilization-history window options (server persists 2 h, caps at 120 min). */
+export const HIST_RANGES: RangeOption[] = [
+  { value: 5, label: '5m', title: 'Show the last 5 minutes' },
+  { value: 15, label: '15m', title: 'Show the last 15 minutes' },
+  { value: 30, label: '30m', title: 'Show the last 30 minutes' },
+  { value: 60, label: '1h', title: 'Show the last hour' },
+  { value: 120, label: '2h', title: 'Show the last 2 hours' },
+]
+
+/** Human label for a window in minutes ("30 minutes", "1 hour", "2 hours"). */
+export function histRangeLabel(minutes: number): string {
+  if (minutes === 60) return 'hour'
+  if (minutes === 120) return '2 hours'
+  return `${minutes} minutes`
+}
+
+/**
+ * Segmented glass range picker — a radiogroup of pill segments with a
+ * primary-glow active state. Used for the utilization-history window
+ * (5 m / 15 m / 30 m / 1 h / 2 h).
+ */
+export function RangePicker({
+  value,
+  onChange,
+  options,
+  className,
+  label = 'Time range',
+}: {
+  value: number
+  onChange: (v: number) => void
+  options: RangeOption[]
+  className?: string
+  label?: string
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className={cn(
+        'glass-inset inline-flex items-center gap-0.5 rounded-full p-0.5',
+        className,
+      )}
+    >
+      {options.map((opt) => {
+        const active = opt.value === value
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            title={opt.title ?? opt.label}
+            onClick={() => onChange(opt.value)}
+            className={cn(
+              'relative h-7 rounded-full px-2.5 text-[11px] font-semibold tabular-nums outline-none transition-all duration-200',
+              'focus-visible:ring-2 focus-visible:ring-ring/60',
+              active
+                ? 'bg-primary/20 text-primary shadow-[inset_0_0_0_1px] shadow-primary/30'
+                : 'text-muted-foreground hover:bg-primary/10 hover:text-foreground',
+            )}
+          >
+            {opt.label}
+            {active ? (
+              <span
+                aria-hidden
+                className="absolute inset-x-2.5 -bottom-px h-px rounded-full bg-primary/70 shadow-[0_0_8px] shadow-primary/60"
+              />
+            ) : null}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 export function LoadingBlock({ label = 'Loading…' }: { label?: string }) {
   return (
     <div className="glass-inset flex items-center justify-center gap-2 rounded-2xl px-6 py-10 text-sm text-muted-foreground">

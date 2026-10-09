@@ -42,8 +42,11 @@ import { cn } from '@/lib/utils'
 import {
   EmptyState,
   ErrorBlock,
+  HIST_RANGES,
+  histRangeLabel,
   LoadingBlock,
   Panel,
+  RangePicker,
   SectionHeader,
   StatusDot,
   timeAgo,
@@ -186,13 +189,17 @@ export default function Overview() {
   const onlineCount = stats?.onlineDevices ?? onlineDevices.length
   const metricsDevices = onlineDevices.filter((d) => metricsByDevice[d.id] != null)
 
-  // DB-backed utilization history (30 min, 30s buckets) with a live tail
+  // utilization-history window (persisted; 5 m … 2 h)
+  const histRange = useDash((s) => s.histRange)
+  const setHistRange = useDash((s) => s.setHistRange)
+
+  // DB-backed utilization history with a live tail
   const {
     data: historyData,
     loading: historyLoading,
     error: historyError,
     devicesReporting: historyDevices,
-  } = useTelemetryHistory({ minutes: 30 })
+  } = useTelemetryHistory({ minutes: histRange })
   const historyStats = useMemo(() => {
     if (historyData.length === 0) return null
     const last = historyData[historyData.length - 1]
@@ -545,7 +552,7 @@ export default function Overview() {
                     const m = metricsByDevice[d.id]
                     return (
                       <div key={d.id} className="glass-inset rounded-xl p-3">
-                        {/* row 1 — hostname gets the full width (no more "HO…") */}
+                        {/* row 1 — hostname gets the entire width (long names never truncate) */}
                         <div className="flex items-center gap-2">
                           <StatusDot online pulse={false} />
                           <span
@@ -554,23 +561,23 @@ export default function Overview() {
                           >
                             {d.hostname}
                           </span>
-                          <span
-                            className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground"
-                            title={`CPU ${m.cpuPercent.toFixed(1)}% · MEM ${m.memoryPercent.toFixed(1)}%`}
-                          >
-                            {Math.round(m.cpuPercent)}% / {Math.round(m.memoryPercent)}%
-                          </span>
                         </div>
-                        {/* row 2 — labeled bars */}
+                        {/* rows 2/3 — labeled bars with the live % on the right */}
                         <div className="mt-2 flex items-center gap-1.5">
                           <span className="w-7 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                             cpu
                           </span>
                           <Progress
                             value={Math.min(100, m.cpuPercent)}
-                            className="h-1.5 flex-1"
+                            className="h-1.5 min-w-0 flex-1"
                             aria-label={`${d.hostname} CPU`}
                           />
+                          <span
+                            className="w-10 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground"
+                            title={`CPU ${m.cpuPercent.toFixed(1)}%`}
+                          >
+                            {Math.round(m.cpuPercent)}%
+                          </span>
                         </div>
                         <div className="mt-1 flex items-center gap-1.5">
                           <span className="w-7 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -578,9 +585,15 @@ export default function Overview() {
                           </span>
                           <Progress
                             value={Math.min(100, m.memoryPercent)}
-                            className="h-1.5 flex-1"
+                            className="h-1.5 min-w-0 flex-1"
                             aria-label={`${d.hostname} memory`}
                           />
+                          <span
+                            className="w-10 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground"
+                            title={`Memory ${m.memoryPercent.toFixed(1)}%`}
+                          >
+                            {Math.round(m.memoryPercent)}%
+                          </span>
                         </div>
                       </div>
                     )
@@ -640,19 +653,25 @@ export default function Overview() {
         </Panel>
       </div>
 
-      {/* Utilization history — DB-backed, 30 min window */}
-      <Panel className="min-w-0 animate-in fade-in slide-in-from-bottom-3 fill-mode-both duration-500 p-4 sm:p-6">
+      {/* Utilization history — DB-backed, window selectable 5 m … 2 h */}
+      <Panel className="card-sheen min-w-0 animate-in fade-in slide-in-from-bottom-3 fill-mode-both duration-500 p-4 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <h3 className="flex items-center gap-2 text-sm font-semibold">
               <History className="size-4 text-primary" aria-hidden />
-              Utilization — last 30 minutes
+              Utilization — last {histRangeLabel(histRange)}
             </h3>
             <p className="mt-0.5 text-xs text-muted-foreground">
               Fleet-wide average per metric · persisted from agent heartbeats · 30s buckets
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <RangePicker
+              value={histRange}
+              onChange={setHistRange}
+              options={HIST_RANGES}
+              label="Utilization history window"
+            />
             <Badge
               variant="outline"
               className="border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400"
@@ -687,7 +706,7 @@ export default function Overview() {
                 const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
                 const a = document.createElement('a')
                 a.href = url
-                a.download = 'sentrarmm-utilization-30min.csv'
+                a.download = `sentrarmm-utilization-${histRange}min.csv`
                 a.click()
                 URL.revokeObjectURL(url)
                 toast.success(`Exported ${historyData.length} telemetry buckets to CSV`)
@@ -740,7 +759,7 @@ export default function Overview() {
               data={historyData}
               metrics={['cpu', 'memory', 'disk']}
               height={220}
-              ariaLabel="Fleet utilization history for the last 30 minutes"
+              ariaLabel={`Fleet utilization history for the last ${histRangeLabel(histRange)}`}
             />
           )}
         </div>

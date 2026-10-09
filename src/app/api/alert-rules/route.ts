@@ -26,6 +26,11 @@ function coerceRule(raw: unknown): AlertRule | null {
   const cooldown = typeof r.cooldownMin === "number" ? r.cooldownMin : Number(r.cooldownMin);
   if (!Number.isFinite(cooldown) || cooldown < 1 || cooldown > 10080) return null;
   if (typeof r.enabled !== "boolean") return null;
+  // optional tag scope — empty/missing becomes null (all devices)
+  const deviceTag =
+    typeof r.deviceTag === "string" && r.deviceTag.trim() !== ""
+      ? r.deviceTag.trim().slice(0, 40)
+      : null;
   return {
     id: r.id.trim(),
     name: r.name.trim(),
@@ -35,6 +40,7 @@ function coerceRule(raw: unknown): AlertRule | null {
     severity: r.severity as AlertRule["severity"],
     cooldownMin: Math.round(cooldown),
     enabled: r.enabled,
+    deviceTag,
   };
 }
 

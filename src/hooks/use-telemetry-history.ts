@@ -155,3 +155,84 @@ export function useTelemetryHistory({
     devicesReporting: deviceId ? (buckets.out.length > 0 ? 1 : 0) : buckets.contributing,
   }
 }
+
+/**
+ * Compact per-device CPU series for the Devices view sparklines.
+ *
+ * One shared query (GET /api/metrics/history?minutes=N) backfills the DB
+ * window; incoming realtime telemetry is appended per device and everything
+ * is condensed into `cap` evenly spaced cpu values (oldest → newest).
+ */
+export function useTelemetrySparklines({
+  minutes = 15,
+  cap = 32,
+}: {
+  minutes?: number
+  cap?: number
+} = {}): {
+  series: Record<string, number[]>
+  loading: boolean
+} {
+  const metricsByDevice = useDash((s) => s.metricsByDevice)
+  const qc = useQueryClient()
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['metrics-history', 'sparks', minutes],
+    queryFn: () =>
+      api<TelemetryAllSeries>(`/api/metrics/history?minutes=${minutes}`).then((r) => r.series),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+
+  // live tail — same alias-normalization strategy as useTelemetryHistory
+  const liveRef = useRef<Record<string, TelemetryPoint[]>>({})
+  const [liveV, setLiveV] = useState(0)
+  useEffect(() => {
+    let added = 0
+    for (const [rawId, m] of Object.entries(metricsByDevice)) {
+      if (!m) continue
+      const t = Date.parse(m.capturedAt)
+      if (!Number.isFinite(t)) continue
+      const arr = (liveRef.current[rawId] ??= [])
+      if (arr.length > 0 && arr[arr.length - 1].t >= t) continue
+      arr.push({ t, cpu: m.cpuPercent, memory: m.memoryPercent, disk: m.diskPercent })
+      if (arr.length > 200) arr.splice(0, arr.length - 200)
+      added += 1
+    }
+    if (added > 0) setLiveV((v) => v + 1)
+  }, [metricsByDevice])
+
+  const series = useMemo(() => {
+    void liveV
+    const devices = qc.getQueryData<Device[]>(['devices'])
+    const resolve = (id: string): string =>
+      devices?.find((d) => d.id === id || d.agentId === id)?.id ?? id
+
+    const cutoff = Date.now() - minutes * 60_000
+    const ids = Array.from(new Set([...Object.keys(data ?? {}), ...Object.keys(liveRef.current)]))
+    const out: Record<string, number[]> = {}
+    for (const rawId of ids) {
+      const id = resolve(rawId)
+      const merged = [...(data?.[rawId] ?? []), ...(liveRef.current[rawId] ?? [])]
+        .filter((p) => p.t >= cutoff)
+        .sort((a, b) => a.t - b.t)
+      if (merged.length < 2) continue
+      // condense into `cap` evenly spaced slices — last value per slice
+      const width = (minutes * 60_000) / cap
+      const vals: number[] = []
+      for (let i = 0; i < cap; i += 1) {
+        const from = cutoff + i * width
+        const to = from + width
+        let v: number | null = null
+        for (const p of merged) {
+          if (p.t >= from && p.t < to) v = round1(p.cpu)
+        }
+        if (v != null) vals.push(v)
+      }
+      if (vals.length >= 2) out[id] = vals
+    }
+    return out
+  }, [data, minutes, cap, liveV, qc])
+
+  return { series, loading: isLoading }
+}

@@ -39,10 +39,11 @@ interface DashState {
   /** live screen viewer — latest frame pushed by the agent (socket `screen:frame`) */
   liveFrame: ScreenFrame | null
   setLiveFrame: (f: ScreenFrame | null) => void
-  /** unread alert counter for the bell badge */
-  unreadAlerts: number
-  bumpUnreadAlerts: () => void
-  clearUnreadAlerts: () => void
+  /** utilization-history window in minutes (5|15|30|60|120, persisted) */
+  histRange: number
+  setHistRange: (v: number) => void
+  /** pull all persisted prefs from localStorage after mount — see hydratePrefs */
+  hydratePrefs: () => void
   /** global command palette (⌘K) */
   paletteOpen: boolean
   setPaletteOpen: (v: boolean) => void
@@ -70,47 +71,9 @@ const ALERT_SOUND_KEY = 'sentrarmm.alertSound'
 const PRESENCE_SOUND_KEY = 'sentrarmm.presenceSound'
 const DEVICE_SORT_KEY = 'sentrarmm.deviceSort'
 const PINNED_KEY = 'sentrarmm.pinnedDevices'
-
-function initialDeviceSort(): DeviceSort {
-  if (typeof window === 'undefined') return 'hostname'
-  try {
-    const raw = window.localStorage.getItem(DEVICE_SORT_KEY)
-    const allowed: DeviceSort[] = ['hostname', 'health', 'lastSeen', 'cpu']
-    return allowed.includes(raw as DeviceSort) ? (raw as DeviceSort) : 'hostname'
-  } catch {
-    return 'hostname'
-  }
-}
-
-function initialPinned(): string[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = window.localStorage.getItem(PINNED_KEY)
-    if (!raw) return []
-    const parsed: unknown = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-function initialAlertSound(): boolean {
-  if (typeof window === 'undefined') return true
-  try {
-    return window.localStorage.getItem(ALERT_SOUND_KEY) !== 'off'
-  } catch {
-    return true
-  }
-}
-
-function initialPresenceSound(): boolean {
-  if (typeof window === 'undefined') return false
-  try {
-    return window.localStorage.getItem(PRESENCE_SOUND_KEY) === 'on'
-  } catch {
-    return false
-  }
-}
+const HIST_RANGE_KEY = 'sentrarmm.histRange'
+const HIST_RANGE_ALLOWED = [5, 15, 30, 60, 120]
+const DEVICE_SORT_ALLOWED: DeviceSort[] = ['hostname', 'health', 'lastSeen', 'cpu']
 
 export const useDash = create<DashState>((set) => ({
   view: 'overview',
@@ -132,10 +95,58 @@ export const useDash = create<DashState>((set) => ({
   cpuHistory: {},
   liveFrame: null,
   setLiveFrame: (liveFrame) => set({ liveFrame }),
-  unreadAlerts: 0,
-  bumpUnreadAlerts: () => set((s) => ({ unreadAlerts: s.unreadAlerts + 1 })),
-  clearUnreadAlerts: () => set({ unreadAlerts: 0 }),
-  alertSound: initialAlertSound(),
+  histRange: 30,
+  setHistRange: (histRange) => {
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(HIST_RANGE_KEY, String(histRange))
+      }
+    } catch {
+      // storage unavailable — in-memory only
+    }
+    set({ histRange })
+  },
+  hydratePrefs: () => {
+    if (typeof window === 'undefined') return
+    const patch: Partial<DashState> = {}
+    try {
+      const rawRange = Number(window.localStorage.getItem(HIST_RANGE_KEY))
+      if (HIST_RANGE_ALLOWED.includes(rawRange)) patch.histRange = rawRange
+    } catch {
+      // storage unavailable — keep defaults
+    }
+    try {
+      const rawSort = window.localStorage.getItem(DEVICE_SORT_KEY)
+      if (rawSort && DEVICE_SORT_ALLOWED.includes(rawSort as DeviceSort)) {
+        patch.deviceSort = rawSort as DeviceSort
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      const rawPinned = window.localStorage.getItem(PINNED_KEY)
+      if (rawPinned) {
+        const parsed: unknown = JSON.parse(rawPinned)
+        if (Array.isArray(parsed)) {
+          patch.pinnedDevices = parsed.filter((v): v is string => typeof v === 'string')
+        }
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if (window.localStorage.getItem(ALERT_SOUND_KEY) === 'off') patch.alertSound = false
+    } catch {
+      // ignore
+    }
+    try {
+      if (window.localStorage.getItem(PRESENCE_SOUND_KEY) === 'on') patch.presenceSound = true
+    } catch {
+      // ignore
+    }
+    if (Object.keys(patch).length > 0) set(patch)
+  },
+  alertSound: true,
   paletteOpen: false,
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   helpOpen: false,
@@ -150,7 +161,7 @@ export const useDash = create<DashState>((set) => ({
     }
     set({ alertSound })
   },
-  presenceSound: initialPresenceSound(),
+  presenceSound: false,
   setPresenceSound: (presenceSound) => {
     try {
       if (typeof window !== 'undefined') {
@@ -161,7 +172,7 @@ export const useDash = create<DashState>((set) => ({
     }
     set({ presenceSound })
   },
-  deviceSort: initialDeviceSort(),
+  deviceSort: 'hostname',
   setDeviceSort: (deviceSort) => {
     try {
       if (typeof window !== 'undefined') {
@@ -172,7 +183,7 @@ export const useDash = create<DashState>((set) => ({
     }
     set({ deviceSort })
   },
-  pinnedDevices: initialPinned(),
+  pinnedDevices: [],
   togglePinnedDevice: (id) =>
     set((s) => {
       const next = s.pinnedDevices.includes(id)

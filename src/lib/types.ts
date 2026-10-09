@@ -332,6 +332,12 @@ export interface AlertRule {
   severity: "info" | "warning" | "critical";
   cooldownMin: number; // min minutes between repeat alerts for the same device
   enabled: boolean;
+  /**
+   * Optional tag scope — when set, the rule only evaluates against devices
+   * whose tags include this value (e.g. "production"). null/undefined = all
+   * devices.
+   */
+  deviceTag?: string | null;
 }
 
 export const DEFAULT_ALERT_RULES: AlertRule[] = [

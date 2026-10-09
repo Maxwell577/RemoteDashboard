@@ -48,6 +48,8 @@ export interface RuleEvaluationInput {
   cpuPercent?: number | null;
   memoryPercent?: number | null;
   diskPercent?: number | null;
+  /** device tags — used for tag-scoped rules (AlertRule.deviceTag) */
+  tags?: string[];
 }
 
 /** The metric value a rule tests, from the telemetry snapshot. */
@@ -95,6 +97,8 @@ export async function evaluateRulesForDevice(
   for (const rule of rules) {
     try {
       if (!rule.enabled) continue;
+      // tag scope — a scoped rule only applies to devices carrying its tag
+      if (rule.deviceTag && !(entry.tags ?? []).includes(rule.deviceTag)) continue;
       const value = metricValue(rule, entry);
       if (value == null || !Number.isFinite(value)) continue;
       if (!isBreached(rule, value)) continue;
