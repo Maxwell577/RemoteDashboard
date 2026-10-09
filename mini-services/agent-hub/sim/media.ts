@@ -16,6 +16,9 @@ export interface DesktopOpts {
   cpu: number;
   mem: number;
   disk: number;
+  /** per-frame jittered network throughput so live-view frames visibly differ */
+  netUpKBps: number;
+  netDownKBps: number;
   uptimeSec: number;
   cpuHistory: number[];
   palette: [string, string, string];
@@ -26,7 +29,10 @@ export interface DesktopOpts {
 export function svgDesktop(o: DesktopOpts): string {
   const W = 1600;
   const H = 900;
-  const time = o.now.toTimeString().slice(0, 5);
+  // seconds precision → every live-view frame renders a unique clock
+  const time = o.now.toTimeString().slice(0, 8);
+  const netUp = o.netUpKBps >= 1024 ? `${(o.netUpKBps / 1024).toFixed(1)} MB/s` : `${Math.round(o.netUpKBps)} KB/s`;
+  const netDown = o.netDownKBps >= 1024 ? `${(o.netDownKBps / 1024).toFixed(1)} MB/s` : `${Math.round(o.netDownKBps)} KB/s`;
   const date = o.now.toLocaleDateString("en-US", { month: "numeric", day: "numeric", year: "numeric" });
   const [c1, c2, c3] = o.palette;
   const a = o.accent;
@@ -96,6 +102,9 @@ export function svgDesktop(o: DesktopOpts): string {
     ${mkBar("CPU", o.cpu, 268)}
     ${mkBar("RAM", o.mem, 312)}
     ${mkBar("DISK", o.disk, 356)}
+    <text x="400" y="412" font-family="Segoe UI,Arial" font-size="15" fill="#e8f6f2" opacity="0.85">NET</text>
+    <text x="460" y="412" font-family="Consolas,monospace" font-size="15" fill="#7ef0cf">↑ ${netUp}</text>
+    <text x="640" y="412" font-family="Consolas,monospace" font-size="15" fill="#7ec8f0">↓ ${netDown}</text>
     <text x="396" y="432" font-family="Segoe UI,Arial" font-size="13" fill="rgba(255,255,255,0.65)" letter-spacing="2">CPU — LAST ${hist.length} SAMPLES</text>
     <rect x="${sx}" y="${sy}" width="${sw}" height="${sh}" rx="10" fill="rgba(255,255,255,0.05)"/>
     <line x1="${sx}" y1="${sy + sh}" x2="${sx + sw}" y2="${sy + sh}" stroke="rgba(255,255,255,0.15)"/>

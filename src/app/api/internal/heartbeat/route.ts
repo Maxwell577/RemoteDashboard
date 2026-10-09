@@ -64,14 +64,34 @@ export async function POST(req: NextRequest) {
           select: { id: true, hostname: true },
         });
         if (device) {
+          const cpu = numOrNull((m as Record<string, unknown>).cpuPercent);
+          const memory = numOrNull((m as Record<string, unknown>).memoryPercent);
+          const disk = numOrNull((m as Record<string, unknown>).diskPercent);
+
+          // Persist a rolling telemetry sample for the history charts.
+          try {
+            if (cpu !== null && memory !== null && disk !== null) {
+              await db.telemetrySample.create({
+                data: { deviceId: device.id, cpu, memory, disk },
+              });
+              // Prune to the last 2h. Run cheaply on every insert; the index
+              // on createdAt keeps this a fast range delete.
+              await db.telemetrySample.deleteMany({
+                where: { createdAt: { lt: new Date(Date.now() - 2 * 3_600_000) } },
+              });
+            }
+          } catch (e) {
+            console.error("telemetry sample persistence failed (ignored)", e);
+          }
+
           const [rules, settings] = await Promise.all([getAlertRules(), getAppSettings()]);
           const created = await evaluateRulesForDevice(
             {
               deviceId: device.id,
               hostname: device.hostname,
-              cpuPercent: numOrNull((m as Record<string, unknown>).cpuPercent),
-              memoryPercent: numOrNull((m as Record<string, unknown>).memoryPercent),
-              diskPercent: numOrNull((m as Record<string, unknown>).diskPercent),
+              cpuPercent: cpu,
+              memoryPercent: memory,
+              diskPercent: disk,
             },
             rules,
             settings.alertRulesEnabled,

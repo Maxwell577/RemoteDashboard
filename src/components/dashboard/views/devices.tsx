@@ -30,6 +30,8 @@ import { toast } from 'sonner'
 import { api, computeHealthScore, type Device, type DeviceType, type MediaAsset } from '@/lib/types'
 import { useDash, type DeviceSort, type ViewId } from '@/lib/store'
 import DeviceActivity from '../device-activity'
+import { TelemetryChart } from '../telemetry-chart'
+import { useTelemetryHistory } from '@/hooks/use-telemetry-history'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -212,6 +214,38 @@ function CpuSparkline({ history, className }: { history: number[]; className?: s
   )
 }
 
+/**
+ * DB-backed 30-minute utilization chart for one device (details dialog).
+ * Falls back to an informative empty state for offline / fresh devices.
+ */
+function DeviceUtilizationChart({ deviceId, online }: { deviceId: string; online: boolean }) {
+  const { data, loading, error } = useTelemetryHistory({ deviceId, minutes: 30 })
+  if (error) {
+    return <ErrorBlock message={`History unavailable — ${error}`} />
+  }
+  if (data.length === 0) {
+    return (
+      <div className="glass-inset flex h-24 items-center justify-center rounded-xl px-4 text-center text-[11px] text-muted-foreground">
+        {loading
+          ? 'Loading utilization history…'
+          : online
+            ? 'Not enough samples yet — history accumulates every heartbeat (~15s).'
+            : 'Device offline — history will resume on the next connection.'}
+      </div>
+    )
+  }
+  return (
+    <TelemetryChart
+      data={data}
+      metrics={['cpu', 'memory']}
+      height={140}
+      showLegend={false}
+      ariaLabel="Device utilization for the last 30 minutes"
+      className="glass-inset rounded-xl p-1.5"
+    />
+  )
+}
+
 function healthTone(score: number): string {
   if (score >= 80) return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
   if (score >= 55) return 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
@@ -390,6 +424,10 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
               : 'Device offline — no live metrics.'}
           </p>
         )}
+      </DetailSection>
+
+      <DetailSection title="Utilization — 30 min">
+        <DeviceUtilizationChart deviceId={device.id} online={device.status === 'online'} />
       </DetailSection>
 
       <DetailSection title="Notes">

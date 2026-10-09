@@ -235,6 +235,28 @@ export interface DeviceMetrics {
   capturedAt: string;
 }
 
+// ─────────────────────── Telemetry history charts ──────────────────
+
+/** One sampled utilization point (device heartbeat), ascending by time. */
+export interface TelemetryPoint {
+  t: number; // epoch ms
+  cpu: number;
+  memory: number;
+  disk: number;
+}
+
+export interface TelemetryDeviceSeries {
+  deviceId: string;
+  minutes: number;
+  points: TelemetryPoint[];
+}
+
+export interface TelemetryAllSeries {
+  minutes: number;
+  /** keyed by Device.id */
+  series: Record<string, TelemetryPoint[]>;
+}
+
 // ─────────────────────────── Dashboard stats ───────────────────────
 
 export interface DashboardStats {
@@ -406,6 +428,9 @@ export type ApiResult<T> = ApiOk<T> | ApiErr;
  * POST /api/devices/[id]/notes          body: { notes }             → Device
  *
  * GET  /api/stats                       → DashboardStats
+ *
+ * GET  /api/metrics/history?deviceId=&minutes=30 → TelemetryDeviceSeries
+ * GET  /api/metrics/history?minutes=30           → TelemetryAllSeries
  *
  * GET  /api/commands?deviceId=&limit=   → CommandExecution[]
  * POST /api/commands                    body: { deviceId, command } → CommandExecution (pending)

@@ -15,6 +15,8 @@ import {
   ArrowRight,
   Bell,
   Clapperboard,
+  Download,
+  History,
   LayoutDashboard,
   MonitorSmartphone,
   RadioTower,
@@ -29,7 +31,10 @@ import {
   type DashboardStats,
   type Device,
 } from '@/lib/types'
+import { toast } from 'sonner'
 import { useDash } from '@/lib/store'
+import { useTelemetryHistory } from '@/hooks/use-telemetry-history'
+import { TelemetryChart } from '../telemetry-chart'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -180,6 +185,27 @@ export default function Overview() {
   const onlineDevices = deviceList.filter((d) => d.status === 'online')
   const onlineCount = stats?.onlineDevices ?? onlineDevices.length
   const metricsDevices = onlineDevices.filter((d) => metricsByDevice[d.id] != null)
+
+  // DB-backed utilization history (30 min, 30s buckets) with a live tail
+  const {
+    data: historyData,
+    loading: historyLoading,
+    error: historyError,
+    devicesReporting: historyDevices,
+  } = useTelemetryHistory({ minutes: 30 })
+  const historyStats = useMemo(() => {
+    if (historyData.length === 0) return null
+    const last = historyData[historyData.length - 1]
+    const peakCpu = Math.max(...historyData.map((p) => p.cpu))
+    const avgCpu = historyData.reduce((a, p) => a + p.cpu, 0) / historyData.length
+    return {
+      cpu: Math.round(last.cpu),
+      mem: Math.round(last.memory),
+      disk: Math.round(last.disk),
+      peakCpu: Math.round(peakCpu),
+      avgCpu: Math.round(avgCpu),
+    }
+  }, [historyData])
 
   // Rolling aggregate-CPU + fleet network I/O buffers: seeded with nulls so the
   // lines start rendering once real telemetry arrives. Samples every 5s, reading
@@ -613,6 +639,112 @@ export default function Overview() {
           </div>
         </Panel>
       </div>
+
+      {/* Utilization history — DB-backed, 30 min window */}
+      <Panel className="min-w-0 animate-in fade-in slide-in-from-bottom-3 fill-mode-both duration-500 p-4 sm:p-6">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h3 className="flex items-center gap-2 text-sm font-semibold">
+              <History className="size-4 text-primary" aria-hidden />
+              Utilization — last 30 minutes
+            </h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Fleet-wide average per metric · persisted from agent heartbeats · 30s buckets
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge
+              variant="outline"
+              className="border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400"
+            >
+              {historyDevices} device{historyDevices === 1 ? '' : 's'} reporting
+            </Badge>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 text-muted-foreground"
+              disabled={historyData.length === 0}
+              onClick={() => {
+                const esc = (v: string | number): string => {
+                  const s = String(v)
+                  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+                }
+                const rows = historyData.map(
+                  (p) =>
+                    [
+                      new Date(p.t).toISOString(),
+                      p.cpu,
+                      p.memory,
+                      p.disk,
+                    ]
+                      .map(esc)
+                      .join(','),
+                )
+                const csv = [
+                  'timestamp,cpu_percent,memory_percent,disk_percent',
+                  ...rows,
+                ].join('\n')
+                const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+                const a = document.createElement('a')
+                a.href = url
+                a.download = 'sentrarmm-utilization-30min.csv'
+                a.click()
+                URL.revokeObjectURL(url)
+                toast.success(`Exported ${historyData.length} telemetry buckets to CSV`)
+              }}
+            >
+              <Download className="size-3.5" aria-hidden />
+              Export CSV
+            </Button>
+          </div>
+        </div>
+
+        {historyStats ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Badge
+              variant="outline"
+              className="border-emerald-500/30 bg-emerald-500/10 font-mono text-[11px] text-emerald-600 dark:text-emerald-400"
+            >
+              cpu {historyStats.cpu}%
+            </Badge>
+            <Badge
+              variant="outline"
+              className="border-teal-500/30 bg-teal-500/10 font-mono text-[11px] text-teal-600 dark:text-teal-400"
+            >
+              mem {historyStats.mem}%
+            </Badge>
+            <Badge
+              variant="outline"
+              className="border-fuchsia-500/30 bg-fuchsia-500/10 font-mono text-[11px] text-fuchsia-600 dark:text-fuchsia-400"
+            >
+              disk {historyStats.disk}%
+            </Badge>
+            <Badge variant="secondary" className="font-mono text-[11px]">avg {historyStats.avgCpu}%</Badge>
+            <Badge variant="secondary" className="font-mono text-[11px]">peak {historyStats.peakCpu}%</Badge>
+          </div>
+        ) : null}
+
+        <div className="mt-3">
+          {historyLoading && historyData.length === 0 ? (
+            <LoadingBlock label="Loading telemetry history…" />
+          ) : historyError ? (
+            <ErrorBlock message={historyError} />
+          ) : historyData.length === 0 ? (
+            <EmptyState
+              icon={<History className="h-5 w-5" />}
+              title="No history yet"
+              hint="Utilization accumulates here as agent heartbeats persist (one sample every 15s)."
+            />
+          ) : (
+            <TelemetryChart
+              data={historyData}
+              metrics={['cpu', 'memory', 'disk']}
+              height={220}
+              ariaLabel="Fleet utilization history for the last 30 minutes"
+            />
+          )}
+        </div>
+      </Panel>
 
       {/* Recent activity + active alerts */}
       <div className="grid min-w-0 gap-4 lg:grid-cols-2">

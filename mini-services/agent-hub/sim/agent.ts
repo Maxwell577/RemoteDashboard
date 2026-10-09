@@ -237,6 +237,9 @@ export class SimAgent {
       cpu: m?.cpuPercent ?? this.def.cpuBase,
       mem: m?.memoryPercent ?? this.def.memBase,
       disk: this.def.diskPercent,
+      // jittered per call → consecutive live-view frames differ (net meters + clock seconds)
+      netUpKBps: Math.max(4, Math.round(jitter(this.def.netUpBase, this.def.netUpSpread))),
+      netDownKBps: Math.max(16, Math.round(jitter(this.def.netDownBase, this.def.netDownSpread))),
       uptimeSec: Math.floor((Date.now() - this.bootTime) / 1000),
       cpuHistory: this.cpuHistory,
       palette: this.def.palette,

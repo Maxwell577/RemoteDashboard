@@ -382,6 +382,343 @@ function qwinsta(ctx: ExecContext): string {
   return rows.join("\n");
 }
 
+// ── extended command set ────────────────────────────────────────────────
+
+function getDatePs(): string {
+  const d = new Date();
+  const long = d.toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  return `${long} ${d.toLocaleTimeString("en-US", { hour12: false })}`;
+}
+
+const BASE_SERVICES: [string, string, boolean][] = [
+  ["Audiosrv", "Windows Audio", true],
+  ["BFE", "Base Filtering Engine", true],
+  ["Dhcp", "DHCP Client", true],
+  ["Dnscache", "DNS Client", true],
+  ["EventLog", "Windows Event Log", true],
+  ["gpsvc", "Group Policy Client", true],
+  ["LanmanServer", "Server", true],
+  ["LanmanWorkstation", "Workstation", true],
+  ["Schedule", "Task Scheduler", true],
+  ["Spooler", "Print Spooler", false],
+  ["Themes", "Themes", true],
+  ["W32Time", "Windows Time", true],
+  ["WinDefend", "Microsoft Defender Antivirus Service", true],
+  ["WSearch", "Windows Search", true],
+  ["wuauserv", "Windows Update", false],
+];
+
+const SERVER_SERVICES: [string, string, boolean][] = [
+  ["IISADMIN", "IIS Admin Service", true],
+  ["Netlogon", "Netlogon", true],
+  ["W3SVC", "World Wide Web Publishing Service", true],
+  ["RemoteRegistry", "Remote Registry", false],
+];
+
+function getService(ctx: ExecContext, nameFilter: string | null): { output: string; exitCode: number } {
+  const all = [...BASE_SERVICES, ...(ctx.def.profile === "server" ? SERVER_SERVICES : [])];
+  const rows = [
+    "",
+    `${w("Status", 9)}${w("Name", 18)}DisplayName`,
+    `${"-----".padEnd(9)}${"----".padEnd(18)}-----------`,
+  ];
+  const list = nameFilter
+    ? all.filter(([n, dn]) => n.toLowerCase() === nameFilter.toLowerCase() || dn.toLowerCase().includes(nameFilter.toLowerCase()))
+    : all;
+  if (list.length === 0) {
+    return {
+      output: `Get-Service : Cannot find any service matching '${nameFilter}'.`,
+      exitCode: 1,
+    };
+  }
+  for (const [n, dn, running] of list) {
+    rows.push(`${w(running ? "Running" : "Stopped", 9)}${w(n, 18)}${dn}`);
+  }
+  return { output: rows.join("\n"), exitCode: 0 };
+}
+
+function getEventLog(ctx: ExecContext): string {
+  const d = ctx.def;
+  const sources =
+    d.profile === "server"
+      ? ["Microsoft-Windows-Security-Auditing", "DNS", "Service Control Manager", "Kernel-Power", "Schannel"]
+      : ["Service Control Manager", "Kernel-Power", "WinDefend", "WMI", "User32"];
+  const msgs = [
+    "The service entered the running state.",
+    "The system has rebooted after cleanly shutting down.",
+    "Definition update completed successfully.",
+    "A new device was detected and drivers installed.",
+    "The WinRM service is listening for requests.",
+    "An account was successfully logged on.",
+    "Network link has been established.",
+  ];
+  const types: [string, string][] = [
+    ["Information", "  "],
+    ["Warning", "   "],
+    ["Error", "     "],
+  ];
+  const rows = [
+    "",
+    `   Index Time          EntryType   Source                          InstanceID  Message`,
+    `   ----- ----          ---------   ------                          ----------  -------`,
+  ];
+  for (let i = 0; i < 12; i++) {
+    const [t, pad] = i % 5 === 3 ? types[1] : i % 9 === 7 ? types[2] : types[0];
+    const dt = new Date(Date.now() - i * rndInt(400_000, 3_600_000));
+    rows.push(
+      `${wl(String(9412 - i * 7), 8)} ${fmtDirDate(dt).padEnd(18)}${w(t, 12)}${w(pick(sources), 32)}${wl(String(rndInt(1000, 50000)), 10)}${pad}${pick(msgs)}`,
+    );
+  }
+  return rows.join("\n");
+}
+
+function getNetAdapter(ctx: ExecContext): string {
+  const d = ctx.def;
+  const rows = [
+    "",
+    `${w("Name", 12)}${w("InterfaceDescription", 44)}${w("ifIndex", 9)}${w("Status", 10)}${wl("MacAddress", 18)}${wl("LinkSpeed", 12)}`,
+    `${"----".padEnd(12)}${"--------------------".padEnd(44)}${"-------".padEnd(9)}${"------".padEnd(10)}${"----------".padEnd(18)}${"---------".padEnd(12)}`,
+  ];
+  const mac = d.info.macAddress;
+  rows.push(`${w("Ethernet", 12)}${w(d.nicDescription, 44)}${w("12", 9)}${w("Up", 10)}${wl(mac, 18)}${wl("1 Gbps", 12)}`);
+  if (d.profile === "server") {
+    rows.push(`${w("Lab-Isolated", 12)}${w("Intel(R) Ethernet Server Adapter", 44)}${w("18", 9)}${w("Up", 10)}${wl("02-11-32-af-4c-07", 18)}${wl("10 Gbps", 12)}`);
+  }
+  rows.push(`${w("Bluetooth", 12)}${w("Intel(R) Wireless Bluetooth(R)", 44)}${w("17", 9)}${w("Disconnected", 10)}${wl("44-38-39-00-24-d1", 18)}${wl("", 12)}`);
+  return rows.join("\n");
+}
+
+function ping(target: string): { output: string; exitCode: number } {
+  const host = target || "192.168.1.1";
+  const ip = /^\d{1,3}(\.\d{1,3}){3}$/.test(host)
+    ? host
+    : `93.184.${(host.length * 7) % 250}.${(host.length * 13) % 250}`;
+  const rows = [
+    "",
+    `Pinging ${host} [${ip}] with 32 bytes of data:`,
+    "",
+  ];
+  for (let i = 0; i < 4; i++) rows.push(`Reply from ${ip}: bytes=32 time=${rndInt(2, 38)}ms TTL=${rndInt(48, 118)}`);
+  rows.push(
+    "",
+    `Ping statistics for ${ip}:`,
+    "    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),",
+    "Approximate round trip times in milli-seconds:",
+    `    Minimum = ${rndInt(2, 8)}ms, Maximum = ${rndInt(20, 40)}ms, Average = ${rndInt(9, 22)}ms`,
+  );
+  return { output: rows.join("\n"), exitCode: 0 };
+}
+
+function getLocalUser(ctx: ExecContext): string {
+  const d = ctx.def;
+  const rows = [
+    "",
+    `${w("Name", 16)}${w("Enabled", 9)}${w("LastLogon", 22)}Description`,
+    `${"----".padEnd(16)}${"-------".padEnd(9)}${"---------".padEnd(22)}-----------`,
+  ];
+  const users: [string, boolean, string][] = [
+    ["Administrator", false, "Built-in account for administering the computer"],
+    [d.userName, true, "Primary local user"],
+    ["svc-backup", true, "Backup automation service account"],
+    ["Guest", false, "Built-in account for guest access"],
+  ];
+  for (const [name, enabled, desc] of users) {
+    const last = enabled ? fmtDirDate(new Date(Date.now() - rndInt(1, 30) * 3_600_000)) : "Never";
+    rows.push(`${w(name, 16)}${w(enabled ? "True" : "False", 9)}${w(last, 22)}${desc}`);
+  }
+  return rows.join("\n");
+}
+
+function getHotfix(): string {
+  const rows = [
+    "",
+    `${w("HotFixID", 12)}${w("Description", 14)}${w("InstalledOn", 14)}InstalledBy`,
+    `${"--------".padEnd(12)}${"-----------".padEnd(14)}${"-----------".padEnd(14)}-----------`,
+  ];
+  const fixes: [string, string, number][] = [
+    ["KB5034123", "Security Update", 12],
+    ["KB5034441", "Update", 38],
+    ["KB5034848", "Security Update", 58],
+    ["KB5035845", "Security Update", 74],
+  ];
+  for (const [id, desc, daysAgo] of fixes) {
+    rows.push(`${w(id, 12)}${w(desc, 14)}${w(fmtDirDate(new Date(Date.now() - daysAgo * 86_400_000)), 14)}NT AUTHORITY\\SYSTEM`);
+  }
+  return rows.join("\n");
+}
+
+function getCimOs(ctx: ExecContext): string {
+  const d = ctx.def;
+  const upSec = ctx.uptimeSec;
+  const days = Math.floor(upSec / 86_400);
+  const hours = Math.floor((upSec % 86_400) / 3_600);
+  const minutes = Math.floor((upSec % 3_600) / 60);
+  return [
+    "",
+    "SystemDirectory  : C:\\Windows\\system32",
+    "Organization     : Sentra Labs",
+    "BuildNumber      : " + d.osBuild.split(".")[2],
+    "RegisteredUser   : " + d.userName,
+    "SerialNumber     : 00330-80000-00000-AA" + rndInt(100, 999),
+    "Version          : " + d.osBuild,
+    "OSArchitecture   : 64-bit",
+    `LastBootUpTime   : ${fmtLong(new Date(Date.now() - upSec * 1000))}`,
+    `TotalVisibleMemorySize : ${num(d.info.totalMemoryMB * 1024)}`,
+    `Uptime           : ${days}.${hours}:${minutes}:00`,
+  ].join("\n");
+}
+
+function arpA(ctx: ExecContext): string {
+  const base = ctx.def.info.localIp.split(".").slice(0, 3).join(".");
+  const rows = [
+    "",
+    `Interface: ${ctx.def.info.localIp} --- 0xc`,
+    "  Internet Address      Physical Address      Type",
+    `  ${base}.1            3c-84-6a-1f-22-d0     dynamic`,
+    `  ${base}.255           ff-ff-ff-ff-ff-ff     static`,
+    "  224.0.0.22            01-00-5e-00-00-16     static",
+    "  239.255.255.250       01-00-5e-7f-ff-fa     static",
+  ];
+  for (let i = 0; i < 4; i++) {
+    rows.push(`  ${base}.${rndInt(100, 250)}           ${rndHexMac()}     dynamic`);
+  }
+  return rows.join("\n");
+}
+
+function rndHexMac(): string {
+  const part = (): string => Math.floor(Math.random() * 256).toString(16).padStart(2, "0");
+  return `${part()}-${part()}-${part()}-${part()}-${part()}-${part()}`;
+}
+
+function routePrint(ctx: ExecContext): string {
+  const base = ctx.def.info.localIp.split(".").slice(0, 3).join(".");
+  return [
+    "",
+    "IPv4 Route Table",
+    "===========================================================================",
+    "Active Routes:",
+    "Network Destination        Netmask          Gateway       Interface  Metric",
+    `          0.0.0.0          0.0.0.0        ${base}.1     ${ctx.def.info.localIp}     25`,
+    `        127.0.0.0        255.0.0.0         On-link         127.0.0.1    331`,
+    `        ${base}.0      255.255.255.0         On-link    ${ctx.def.info.localIp}    281`,
+    `     ${base}.255        255.255.255.255        On-link     ${ctx.def.info.localIp}    281`,
+    "===========================================================================",
+  ].join("\n");
+}
+
+function getScheduledTask(ctx: ExecContext): string {
+  const rows = [
+    "",
+    `${w("Status", 10)}${w("TaskName", 38)}TaskPath`,
+    `${"------".padEnd(10)}${"--------".padEnd(38)}--------`,
+  ];
+  const tasks: [string, string, boolean][] = [
+    ["Adobe Acrobat Update Task", "\\Adobe Acrobat Update Task\\", false],
+    ["CreateExplorerShellUnelevatedTask", "\\Microsoft\\Windows\\Shell\\", true],
+    ["MicrosoftEdgeUpdateTaskMachineCore", "\\MicrosoftEdgeUpdate\\", true],
+    ["OneDrive Standalone Update Task", "\\OneDrive Standalone Update Task\\", true],
+    ["ReconcileLanguageResources", "\\Microsoft\\Windows\\AppxDeploymentClient\\", false],
+    ["Sentra Agent Watchdog", "\\SentraLabs\\", true],
+    ["StartComponentCleanup", "\\Microsoft\\Windows\\Servicing\\", false],
+  ];
+  if (ctx.def.profile === "server") tasks.push(["Backup-LabNightly", "\\SentraLabs\\", true], ["Optimize-Disks", "\\Microsoft\\Windows\\Maintenance\\", false]);
+  for (const [name, path, ready] of tasks) {
+    rows.push(`${w(ready ? "Ready" : "Disabled", 10)}${w(name, 38)}${path}`);
+  }
+  return rows.join("\n");
+}
+
+function envList(ctx: ExecContext): string {
+  const d = ctx.def;
+  const vars: [string, string][] = [
+    ["COMPUTERNAME", d.info.hostname],
+    ["NUMBER_OF_PROCESSORS", String(d.info.cpuCores)],
+    ["OS", "Windows_NT"],
+    ["PROCESSOR_ARCHITECTURE", "AMD64"],
+    ["PROCESSOR_IDENTIFIER", d.info.cpuModel],
+    ["PATH", "C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\"],
+    ["SystemRoot", "C:\\Windows"],
+    ["TEMP", `C:\\Users\\${d.userName}\\AppData\\Local\\Temp`],
+    ["USERNAME", d.userName],
+    ["USERPROFILE", `C:\\Users\\${d.userName}`],
+    ["windir", "C:\\Windows"],
+  ];
+  const rows = ["", `${w("Name", 24)}Value`, `${"----".padEnd(24)}-----`];
+  for (const [k, v] of vars) rows.push(`${w(k, 24)}${v}`);
+  return rows.join("\n");
+}
+
+function psVersionTable(ctx: ExecContext): string {
+  return [
+    "",
+    "Name                           Value",
+    "----                           -----",
+    "PSVersion                      5.1.19041.3803",
+    "PSEdition                      Desktop",
+    `PSCompatibleVersions            {1.0, 2.0, 3.0, 4.0...}`,
+    "BuildVersion                   10.0.19041.3803",
+    `CLRVersion                     4.0.30319.42000`,
+    "WSManStackVersion              3.0",
+    `PSRemotingProtocolVersion      2.3`,
+    `SerializationVersion           1.1.0.1`,
+  ].join("\n").replace("19041.3803", ctx.def.osBuild.split(".")[2] + ".3803");
+}
+
+function tracert(target: string): string {
+  const host = target || "sentra.local";
+  const ip = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? host : "142.250.72.68";
+  const rows = [
+    "",
+    `Tracing route to ${host} [${ip}]`,
+    "over a maximum of 30 hops:",
+    "",
+    "  1     1 ms     1 ms     1 ms  192.168.1.1",
+  ];
+  for (let i = 2; i <= 5; i++) {
+    rows.push(`  ${i}    ${rndInt(4, 18)} ms   ${rndInt(4, 20)} ms   ${rndInt(4, 22)} ms  10.${i}0.${rndInt(0, 12)}.${rndInt(1, 250)}`);
+  }
+  rows.push(`  6    ${rndInt(9, 24)} ms   ${rndInt(9, 26)} ms   ${rndInt(9, 28)} ms  ${ip}`);
+  rows.push("", "Trace complete.");
+  return rows.join("\n");
+}
+
+function nslookup(target: string): string {
+  const host = target || "sentra.local";
+  const ip = `93.184.${(host.length * 7) % 250}.${(host.length * 13) % 250}`;
+  return [
+    "",
+    "Server:  OneSpeedy.one.one",
+    "Address:  192.168.1.1",
+    "",
+    `Non-authoritative answer:`,
+    `Name:    ${host}`,
+    `Address:  ${ip}`,
+  ].join("\n");
+}
+
+function whoamiGroups(ctx: ExecContext): string {
+  const rows = [
+    "",
+    "GROUP INFORMATION",
+    "-----------------",
+    "",
+    "Group Name                             Type             SID          Attributes",
+    "====================================== =============== ============ ==================================================",
+    "Everyone                               Well-known group S-1-1-0      Mandatory group, Enabled by default, Enabled group",
+    "BUILTIN\\Users                          Alias            S-1-5-32-545 Mandatory group, Enabled by default, Enabled group",
+    "BUILTIN\\Performance Log Users          Alias            S-1-5-32-559 Mandatory group, Enabled by default, Enabled group",
+    "NT AUTHORITY\\SERVICE                   Well-known group S-1-5-6      Mandatory group, Enabled by default, Enabled group",
+    `NT AUTHORITY\\Authenticated Users       Well-known group S-1-5-11     Mandatory group, Enabled by default, Enabled group`,
+  ];
+  if (ctx.def.profile === "server") rows.splice(8, 0, "BUILTIN\\Administrators                   Alias            S-1-5-32-544 Mandatory group, Enabled by default, Enabled group");
+  return rows.join("\n");
+}
+
 // ── dispatcher ───────────────────────────────────────────────────────────
 
 export async function runCommand(command: string, ctx: ExecContext): Promise<ExecResult> {
@@ -392,41 +729,140 @@ export async function runCommand(command: string, ctx: ExecContext): Promise<Exe
   let output: string;
   let exitCode = 0;
 
-  const dirCmd = /^(dir|ls|gci)(\s+(.*))?$/.exec(lower);
+  const dirCmd = /^(dir|ls|gci|get-childitem)(\s+(.*))?$/.exec(lower);
+  const args = (cmd: string): string => trimmed.slice(cmd.length).trim();
 
-  if (lower === "sysinfo" || lower === "systeminfo") {
+  if (lower === "sysinfo" || lower === "systeminfo" || lower === "get-computerinfo") {
     output = sysinfo(ctx);
+  } else if (lower === "get-date" || lower === "date") {
+    output = getDatePs();
   } else if (lower === "hostname") {
     output = ctx.def.info.hostname;
-  } else if (lower.startsWith("whoami")) {
-    output = lower.includes("/priv")
-      ? whoamiPriv(ctx)
-      : `${ctx.def.info.hostname.toLowerCase()}\\${ctx.def.userName}`;
+  } else if (lower === "whoami" || lower.startsWith("whoami ")) {
+    if (lower.includes("/priv")) output = whoamiPriv(ctx);
+    else if (lower.includes("/groups")) output = whoamiGroups(ctx);
+    else output = `${ctx.def.info.hostname.toLowerCase()}\\${ctx.def.userName}`;
+  } else if (lower.startsWith("echo ") || lower.startsWith("write-host ") || lower.startsWith("write-output ") || lower === "echo") {
+    const text = lower === "echo" ? "" : trimmed.slice(trimmed.indexOf(" ") + 1);
+    output = text.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
   } else if (lower.startsWith("ipconfig")) {
     output = ipconfig(ctx, lower.includes("/all"));
+  } else if (lower.startsWith("ping ") || lower.startsWith("test-connection") || lower === "ping") {
+    const target = lower.startsWith("ping ") ? args("ping") : lower.startsWith("test-connection ") ? args("test-connection") : "";
+    const res = ping(target.replace(/-\w+\s+\S+\s*/g, "").trim());
+    output = res.output;
+    exitCode = res.exitCode;
+  } else if (lower.startsWith("tracert") || lower.startsWith("pathping") || lower.startsWith("trace route")) {
+    output = tracert(lower.startsWith("tracert ") ? args("tracert") : lower.startsWith("pathping ") ? args("pathping") : "");
+  } else if (lower.startsWith("nslookup")) {
+    output = nslookup(lower === "nslookup" ? "" : args("nslookup").replace(/^-\S+\s*/, ""));
+  } else if (lower === "arp -a" || lower === "arp" || lower.startsWith("arp ")) {
+    output = arpA(ctx);
+  } else if (lower.startsWith("route print") || lower === "route") {
+    output = routePrint(ctx);
   } else if (lower.startsWith("netstat")) {
     output = netstat(ctx);
   } else if (lower.startsWith("tasklist")) {
     output = tasklist(ctx);
-  } else if (lower === "get-process" || lower === "ps" || lower.startsWith("get-process ")) {
-    output = getProcess(ctx);
+  } else if (lower === "get-process" || lower === "ps" || lower.startsWith("get-process ") || lower.startsWith("ps ")) {
+    const argStr = lower.startsWith("get-process ") ? args("get-process") : lower.startsWith("ps ") ? args("ps") : "";
+    const nameMatch = /-name\s+([^\s]+|"[^"]+")/.exec(argStr);
+    if (nameMatch) {
+      const needle = nameMatch[1].replace(/"/g, "").toLowerCase();
+      const filtered = ctx.procTable.list().filter((p) => p.name.toLowerCase().includes(needle));
+      output = filtered.length === 0 ? `Get-Process : No process matches '${needle}'.` : getProcess(ctx).split("\n").slice(0, 3).concat(filtered.map((p) => ` ${wl(String(rndInt(8, 40)), 7)}${wl((p.memoryMB * 0.82).toFixed(2), 10)}${wl(p.memoryMB.toFixed(2), 10)}${wl((p.cpuPercent * rndInt(20, 220)).toFixed(2), 12)}${wl(String(p.pid), 9)}${wl(p.user === "SYSTEM" ? "0" : "1", 4)} ${p.name.replace(/\.exe$/i, "")}`)).join("\n");
+      if (filtered.length === 0) exitCode = 1;
+    } else {
+      output = getProcess(ctx);
+    }
+  } else if (/^stop-process(\s|$)/.test(lower)) {
+    const idMatch = /-id\s+(\d+)/.exec(lower);
+    if (!idMatch) {
+      output = "Stop-Process : A positional parameter cannot be found that accepts argument '-Name'. Use Stop-Process -Id <pid>.";
+      exitCode = 1;
+    } else {
+      try {
+        ctx.procTable.action(parseInt(idMatch[1], 10), "kill");
+        output = "";
+      } catch (e) {
+        output = `Stop-Process : ${(e as Error).message}`;
+        exitCode = 1;
+      }
+    }
   } else if (lower === "ver" || lower === "cmd /c ver") {
     output = `Microsoft Windows [Version ${ctx.def.osBuild}]`;
   } else if (lower === "get-location" || lower === "pwd" || lower === "gl") {
     output = getLocation(ctx);
   } else if (dirCmd) {
     const target = dirCmd[3] ? dirCmd[3].trim() : null;
-    const res = dir(ctx, target && target !== "" && !target.startsWith("/") ? target : null);
-    output = res.output;
-    exitCode = res.exitCode;
+    if (target && /^(env|variable)$/i.test(target.replace("env:", "env").split(":")[0])) {
+      output = envList(ctx);
+    } else {
+      const res = dir(ctx, target && target !== "" && !target.startsWith("/") ? target : null);
+      output = res.output;
+      exitCode = res.exitCode;
+    }
   } else if (lower === "get-netipaddress" || lower === "gip") {
     output = getNetIpAddress(ctx);
+  } else if (lower.startsWith("get-netadapter")) {
+    output = getNetAdapter(ctx);
   } else if (lower === "get-volume") {
     output = getVolume(ctx);
   } else if (lower.startsWith("get-psdrive") || lower.startsWith("gpsdrive")) {
     output = getPsDrive(ctx);
   } else if (lower === "qwinsta" || lower === "query session") {
     output = qwinsta(ctx);
+  } else if (lower === "get-service" || lower.startsWith("get-service ") || lower === "gsv") {
+    const raw = lower === "get-service" || lower === "gsv" ? "" : args(lower === "gsv" ? "gsv" : "get-service");
+    const nameMatch = /-name\s+("[^"]+"|[^\s]+)/.exec(raw);
+    const filter = nameMatch ? nameMatch[1].replace(/"/g, "") : raw.replace(/-\w+/, "").trim();
+    const res = getService(ctx, filter || null);
+    output = res.output;
+    exitCode = res.exitCode;
+  } else if (lower.startsWith("get-eventlog") || lower.startsWith("get-winevent")) {
+    output = getEventLog(ctx);
+  } else if (lower.startsWith("get-localuser")) {
+    output = getLocalUser(ctx);
+  } else if (lower.startsWith("get-hotfix")) {
+    output = getHotfix();
+  } else if (lower.startsWith("get-scheduledtask")) {
+    output = getScheduledTask(ctx);
+  } else if (/get-ciminstance|get-wmiobject/.test(lower) && /win32_operatingsystem/.test(lower)) {
+    output = getCimOs(ctx);
+  } else if (lower === "$psversiontable" || lower.startsWith("$psversiontable") || lower === "get-host" || lower === "$host" || lower.startsWith("get-host")) {
+    output = psVersionTable(ctx);
+  } else if (lower === "get-random") {
+    output = String(rndInt(0, 2147483647));
+  } else if (lower === "cls" || lower === "clear" || lower === "clear-host" || lower === "exit") {
+    output = "";
+  } else if (lower.startsWith("get-content") || lower.startsWith("gc ") || lower.startsWith("cat ") || lower.startsWith("type ")) {
+    const raw = args(lower.startsWith("get-content") ? "get-content" : lower.slice(0, 3));
+    const path = raw.replace(/-\w+\s+\S+\s*/g, "").replace(/"/g, "").trim();
+    try {
+      const dl = ctx.vfs.download(path);
+      const text = Buffer.from(dl.contentBase64, "base64").toString("utf8");
+      output = text
+        .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "")
+        .split("\n")
+        .slice(0, 200)
+        .join("\n");
+    } catch (e) {
+      output = `Get-Content : ${(e as Error).message}`;
+      exitCode = 1;
+    }
+  } else if (lower === "get-help" || lower.startsWith("get-help ") || lower === "help" || lower === "man") {
+    output = [
+      "",
+      "Simulated PowerShell session — available commands include:",
+      "",
+      "  systeminfo, get-computerinfo, get-date, hostname, whoami [/priv|/groups]",
+      "  ipconfig [/all], get-netipaddress, get-netadapter, netstat, arp -a, route print",
+      "  ping <host>, tracert <host>, nslookup <host>",
+      "  get-process [-name x], stop-process -id <pid>, tasklist, get-service [-name x]",
+      "  get-eventlog, get-localuser, get-hotfix, get-scheduledtask, get-volume, get-psdrive",
+      "  dir [path], get-content <file>, get-childitem env:, $psversiontable, get-random",
+      "",
+    ].join("\n");
   } else {
     output = notRecognized(trimmed);
     exitCode = 1;

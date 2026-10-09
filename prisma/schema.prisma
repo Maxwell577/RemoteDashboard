@@ -195,6 +195,19 @@ model Setting {
   updatedAt  DateTime @updatedAt
 }
 
+// Rolling telemetry history (one row per device heartbeat, pruned to ~2h)
+model TelemetrySample {
+  id        String   @id @default(cuid())
+  deviceId  String
+  cpu       Float
+  memory    Float
+  disk      Float
+  createdAt DateTime @default(now())
+
+  @@index([deviceId, createdAt])
+  @@index([createdAt])
+}
+
 model SavedCommand {
   id          String   @id @default(cuid())
   name        String

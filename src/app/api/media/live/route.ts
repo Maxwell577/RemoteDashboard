@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
         ? await dispatchToHub<{ started?: unknown; fps?: unknown }>(
             device.agentId,
             "screen:live:start",
-            { fps: 1 },
+            { fps: 2 },
             { deviceId: device.id },
           )
         : await dispatchToHub<{ frames?: unknown }>(
