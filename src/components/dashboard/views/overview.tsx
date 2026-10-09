@@ -552,14 +552,14 @@ export default function Overview() {
                     const m = metricsByDevice[d.id]
                     return (
                       <div key={d.id} className="glass-inset rounded-xl p-3">
-                        {/* row 1 — hostname gets the entire width (long names never truncate) */}
+                        {/* row 1 — name gets the entire width (friendlyName first, hostname as fallback) */}
                         <div className="flex items-center gap-2">
                           <StatusDot online pulse={false} />
                           <span
                             className="min-w-0 flex-1 truncate text-[13px] font-medium"
-                            title={d.hostname}
+                            title={d.friendlyName ? `${d.friendlyName} · ${d.hostname}` : d.hostname}
                           >
-                            {d.hostname}
+                            {d.friendlyName || d.hostname}
                           </span>
                         </div>
                         {/* rows 2/3 — labeled bars with the live % on the right */}
@@ -633,8 +633,8 @@ export default function Overview() {
                 >
                   <StatusDot online={d.status === 'online'} />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium" title={d.hostname}>
-                      {d.hostname}
+                    <span className="block truncate text-sm font-medium" title={d.friendlyName ? `${d.friendlyName} · ${d.hostname}` : d.hostname}>
+                      {d.friendlyName || d.hostname}
                     </span>
                     <span className="block truncate text-xs text-muted-foreground">
                       {d.osName}

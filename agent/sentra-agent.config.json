@@ -1,0 +1,7 @@
+{
+  "hubUrl": "http://127.0.0.1:3003",
+  "friendlyName": "Work Laptop",
+  "tags": ["work"],
+  "heartbeatSec": 15,
+  "deviceType": "laptop"
+}

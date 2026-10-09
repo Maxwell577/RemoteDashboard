@@ -235,9 +235,10 @@ export function RangePicker({
 
 export function LoadingBlock({ label = 'Loading…' }: { label?: string }) {
   return (
-    <div className="glass-inset flex items-center justify-center gap-2 rounded-2xl px-6 py-10 text-sm text-muted-foreground">
+    <div className="glass-inset flex flex-col items-center justify-center gap-3 rounded-2xl px-6 py-10 text-sm text-muted-foreground">
       <Loader2 className="h-4 w-4 animate-spin" />
       {label}
+      <span className="skeleton-shimmer h-1 w-28" aria-hidden />
     </div>
   )
 }

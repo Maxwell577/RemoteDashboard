@@ -21,6 +21,7 @@ import {
   SquareTerminal,
   Star,
   Tag,
+  Tags,
   Timer,
   Wrench,
   X,
@@ -687,7 +688,7 @@ function DeviceCard({
     <>
       <Panel
         className={cn(
-          'glass-hover relative flex flex-col p-4 transition-shadow',
+          'glass-hover lift relative flex flex-col p-4',
           !online && 'opacity-80',
           pinned && !selectMode && 'ring-1 ring-primary/30',
           selectMode && selected && 'ring-2 ring-primary/50 shadow-lg shadow-primary/10',
@@ -938,6 +939,7 @@ export default function Devices() {
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [bulkBusy, setBulkBusy] = useState(false)
   const [tagDialogOpen, setTagDialogOpen] = useState(false)
+  const [tagMode, setTagMode] = useState<'add' | 'remove'>('add')
   const [tagValue, setTagValue] = useState('')
   const deviceSort = useDash((s) => s.deviceSort)
   const setDeviceSort = useDash((s) => s.setDeviceSort)
@@ -955,6 +957,18 @@ export default function Devices() {
     for (const d of deviceList) for (const t of d.tags) s.add(t)
     return [...s].sort((a, b) => a.localeCompare(b))
   }, [deviceList])
+
+  // tags present on the bulk-selected devices, with per-tag device counts
+  const selectedTagCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const d of deviceList) {
+      if (!selectedIds.includes(d.id)) continue
+      for (const t of d.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
+    }
+    return [...counts.entries()]
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => a.tag.localeCompare(b.tag))
+  }, [deviceList, selectedIds])
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -1388,11 +1402,26 @@ export default function Devices() {
             className="h-8 gap-1.5"
             disabled={selectedIds.length === 0 || bulkBusy}
             onClick={() => {
+              setTagMode('add')
               setTagValue('')
               setTagDialogOpen(true)
             }}
           >
             <Tag className="size-3.5 text-teal-500" aria-hidden /> Add tag
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5"
+            disabled={selectedIds.length === 0 || bulkBusy || selectedTagCounts.length === 0}
+            title={selectedTagCounts.length === 0 ? 'The selected devices have no tags' : 'Remove a tag from every selected device'}
+            onClick={() => {
+              setTagMode('remove')
+              setTagValue('')
+              setTagDialogOpen(true)
+            }}
+          >
+            <Tags className="size-3.5 text-rose-500" aria-hidden /> Remove tag
           </Button>
           <Button
             size="sm"
@@ -1406,36 +1435,67 @@ export default function Devices() {
         </div>
       ) : null}
 
-      {/* bulk tag dialog */}
+      {/* bulk tag dialog — add or remove mode */}
       <Dialog open={tagDialogOpen} onOpenChange={setTagDialogOpen}>
         <DialogContent className="glass-strong rounded-2xl sm:max-w-sm">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-base">
-              <Tag className="size-4 text-teal-500" aria-hidden /> Tag {selectedIds.length} device{selectedIds.length === 1 ? '' : 's'}
+              {tagMode === 'add' ? (
+                <>
+                  <Tag className="size-4 text-teal-500" aria-hidden /> Tag {selectedIds.length} device{selectedIds.length === 1 ? '' : 's'}
+                </>
+              ) : (
+                <>
+                  <Tags className="size-4 text-rose-500" aria-hidden /> Untag {selectedIds.length} device{selectedIds.length === 1 ? '' : 's'}
+                </>
+              )}
             </DialogTitle>
             <DialogDescription>
-              Adds a new tag to every selected machine (existing tags are kept).
+              {tagMode === 'add'
+                ? 'Adds a new tag to every selected machine (existing tags are kept).'
+                : 'Pick a tag that exists on at least one selected machine — it is removed from all of them.'}
             </DialogDescription>
           </DialogHeader>
-          <Input
-            value={tagValue}
-            onChange={(e) => setTagValue(e.target.value)}
-            placeholder="e.g. q4-audit"
-            maxLength={40}
-            aria-label="Tag name"
-          />
+          {tagMode === 'add' ? (
+            <Input
+              value={tagValue}
+              onChange={(e) => setTagValue(e.target.value)}
+              placeholder="e.g. q4-audit"
+              maxLength={40}
+              aria-label="Tag name"
+            />
+          ) : (
+            <div className="flex max-h-48 flex-col gap-1.5 overflow-y-auto scroll-slim" role="list" aria-label="Tags on selected devices">
+              {selectedTagCounts.map(({ tag, count }) => (
+                <button
+                  key={tag}
+                  role="listitem"
+                  className="glass-inset flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:border-rose-500/40 hover:bg-rose-500/10"
+                  disabled={bulkBusy}
+                  onClick={() => void runBulk('removeTag', tag)}
+                >
+                  <span className="flex items-center gap-1.5 font-mono text-xs">
+                    <Tag className="size-3 text-teal-500" aria-hidden /> {tag}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">on {count} device{count === 1 ? '' : 's'} — remove</span>
+                </button>
+              ))}
+            </div>
+          )}
           <DialogFooter className="gap-2">
             <Button variant="outline" size="sm" onClick={() => setTagDialogOpen(false)}>
               Cancel
             </Button>
-            <Button
-              size="sm"
-              disabled={tagValue.trim() === '' || bulkBusy}
-              onClick={() => void runBulk('addTag', tagValue.trim())}
-            >
-              {bulkBusy ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
-              Add tag
-            </Button>
+            {tagMode === 'add' ? (
+              <Button
+                size="sm"
+                disabled={tagValue.trim() === '' || bulkBusy}
+                onClick={() => void runBulk('addTag', tagValue.trim())}
+              >
+                {bulkBusy ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
+                Add tag
+              </Button>
+            ) : null}
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -200,7 +200,7 @@ function SidebarFooter() {
     <div className="mt-auto flex flex-col gap-2">
       <HubPill />
       <p className="text-center text-[11px] text-muted-foreground">
-        v0.1.9 • open source
+        v0.2.0 • open source
       </p>
     </div>
   )

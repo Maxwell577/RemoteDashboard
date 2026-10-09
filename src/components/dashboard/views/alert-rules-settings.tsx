@@ -6,11 +6,12 @@
  * a master switch wired into AppSettings.alertRulesEnabled, and an
  * "Evaluate now" probe that runs the engine over the live metrics on screen.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   Cpu,
+  Download,
   Gauge,
   HardDrive,
   Loader2,
@@ -21,6 +22,7 @@ import {
   Siren,
   Tag,
   Trash2,
+  Upload,
   type LucideIcon,
 } from 'lucide-react'
 import {
@@ -332,6 +334,7 @@ export default function AlertRulesSettings({
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [evaluating, setEvaluating] = useState(false)
+  const importInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (rulesQuery.data) setRules((prev) => prev ?? rulesQuery.data)
@@ -441,6 +444,81 @@ export default function AlertRulesSettings({
   const busy = saving || rulesQuery.isLoading
 
   const list = useMemo(() => rules ?? [], [rules])
+
+  // ── rules portability (export / import JSON) ─────────────────────
+  function exportRules() {
+    const payload = {
+      kind: 'sentrarmm-alert-rules',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      rules: list,
+    }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `sentrarmm-alert-rules-${new Date().toISOString().slice(0, 10)}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success(`Exported ${list.length} rule${list.length === 1 ? '' : 's'}`, {
+      description: 'Share the file between consoles or keep it as a backup.',
+    })
+  }
+
+  function sanitizeImported(raw: unknown): AlertRule[] | null {
+    if (!Array.isArray(raw)) return null
+    const metrics = ['cpu', 'memory', 'disk'] as const
+    const out: AlertRule[] = []
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue
+      const r = item as Record<string, unknown>
+      const metric = metrics.includes(r.metric as (typeof metrics)[number]) ? (r.metric as AlertMetric) : null
+      const name = typeof r.name === 'string' ? r.name.trim().slice(0, 80) : ''
+      if (!metric || !name) continue
+      out.push({
+        id: typeof r.id === 'string' && r.id ? r.id : `rule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        name,
+        metric,
+        op: r.op === 'lt' ? 'lt' : 'gt',
+        threshold: Math.min(100, Math.max(0, Number(r.threshold) || 0)),
+        severity: r.severity === 'critical' || r.severity === 'info' ? r.severity : 'warning',
+        cooldownMin: Math.min(1440, Math.max(0, Math.round(Number(r.cooldownMin ?? 15)))),
+        enabled: r.enabled === true,
+        deviceTag: typeof r.deviceTag === 'string' && r.deviceTag.trim() !== '' ? r.deviceTag.trim().slice(0, 40) : null,
+      })
+    }
+    return out
+  }
+
+  function importRules(file: File) {
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed: unknown = JSON.parse(String(reader.result))
+        // accept either a bare array or the { kind, version, rules } export envelope
+        const rawRules =
+          parsed && typeof parsed === 'object' && Array.isArray((parsed as { rules?: unknown }).rules)
+            ? (parsed as { rules: unknown[] }).rules
+            : parsed
+        const imported = sanitizeImported(rawRules)
+        if (!imported || imported.length === 0) {
+          toast.error('Import failed', { description: 'No valid rules found in that file.' })
+          return
+        }
+        // de-dupe against existing ids so a re-import never clobbers ui state keys
+        const existing = new Set(list.map((r) => r.id))
+        for (const r of imported) {
+          if (existing.has(r.id)) r.id = `rule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+        }
+        setRules(imported)
+        toast.info(`Imported ${imported.length} rule${imported.length === 1 ? '' : 's'}`, {
+          description: 'Review the list, then press “Save changes” to apply.',
+        })
+      } catch {
+        toast.error('Import failed', { description: 'That file is not valid JSON.' })
+      }
+    }
+    reader.readAsText(file)
+  }
 
   // every tag known across the fleet — feeds the rule "Applies to" scope picker
   const knownTags = useMemo(() => {
@@ -597,6 +675,25 @@ export default function AlertRulesSettings({
         <Button size="sm" variant="ghost" className="h-9 gap-1.5 text-muted-foreground" disabled={busy} onClick={() => void resetDefaults()}>
           <RotateCcw className="size-3.5" aria-hidden /> Reset defaults
         </Button>
+        <Button size="sm" variant="ghost" className="h-9 gap-1.5 text-muted-foreground" disabled={busy || list.length === 0} onClick={exportRules}>
+          <Download className="size-3.5" aria-hidden /> Export
+        </Button>
+        <Button size="sm" variant="ghost" className="h-9 gap-1.5 text-muted-foreground" disabled={busy} onClick={() => importInputRef.current?.click()}>
+          <Upload className="size-3.5" aria-hidden /> Import
+        </Button>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          aria-hidden
+          tabIndex={-1}
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) importRules(f)
+            e.target.value = ''
+          }}
+        />
         <div className="ml-auto flex items-center gap-3">
           {dirty ? <span className="text-xs text-amber-600 dark:text-amber-400">unsaved changes</span> : null}
           <Button size="sm" className="h-9 min-w-24" disabled={!dirty || saving} onClick={() => void persist(list)}>

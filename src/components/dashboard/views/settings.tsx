@@ -157,16 +157,30 @@ function PresenceSoundRow() {
 
 function AgentEnrollment({ hubUrl, heartbeatSec }: { hubUrl: string; heartbeatSec: number }) {
   const hub = hubUrl?.trim() || 'http://127.0.0.1:3003'
-  const installCmd = `$hub = "${hub}"            # realtime hub endpoint
+  const [track, setTrack] = useState<'node' | 'ps'>('node')
+
+  // The reference agent is plain Node.js — no build step, runs on Windows/
+  // macOS/Linux and speaks the same socket.io protocol as the simulated fleet.
+  const nodeCmd = `# 1 · get the agent (repo folder: /agent) — Node.js 18.15+ required
+npm install
+# 2 · connect it to this hub — the device appears in Devices instantly
+node index.mjs --hub ${hub} --name "Work Laptop" --tags work --interval ${heartbeatSec}`
+
+  const psCmd = `$hub = "${hub}"            # realtime hub endpoint
 $token = "<your-hub-token>"   # x-hub-token shared secret (keep private)
 irm "$hub/agent/install.ps1" -OutFile "$env:TEMP\\sentra-install.ps1"
 pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -Hub $hub -Token $token`
 
+  const cmd = track === 'node' ? nodeCmd : psCmd
+
   const copyCmd = async () => {
     try {
-      await navigator.clipboard.writeText(installCmd)
+      await navigator.clipboard.writeText(cmd)
       toast.success('Install command copied', {
-        description: 'Paste into an elevated PowerShell window on the target machine.',
+        description:
+          track === 'node'
+            ? 'Run it inside the agent/ folder on the target machine.'
+            : 'Paste into an elevated PowerShell window on the target machine.',
       })
     } catch {
       toast.error('Clipboard unavailable — select the text manually')
@@ -176,15 +190,14 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -H
   const downloadConfig = () => {
     const config = {
       hubUrl: hub,
-      socketPath: '/',
-      heartbeatIntervalSec: heartbeatSec,
-      encryption: { algorithm: 'AES-256-GCM', keySource: 'dashboard capturePassword' },
-      capabilities: [
-        'exec', 'fs:list', 'fs:download', 'fs:upload', 'fs:delete', 'fs:rename', 'fs:mkdir',
-        'ps:list', 'ps:action', 'media:screenshot', 'media:record', 'media:stop',
-        'net:start', 'net:stop', 'location:fix', 'screen:live:start', 'screen:live:stop',
-      ],
-      notes: 'SentraRMM agent config — the agent binary ships separately in the open-source repo.',
+      friendlyName: 'Work Laptop',
+      tags: ['work'],
+      heartbeatSec,
+      deviceType: 'laptop',
+      fsRoot: 'C:\\Users\\you',
+      hiddenExec: false,
+      notes:
+        'SentraRMM reference-agent config — place next to agent/index.mjs or pass with --config. CLI flags override these values.',
       generatedAt: new Date().toISOString(),
     }
     const url = URL.createObjectURL(
@@ -207,23 +220,60 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -H
         <div className="min-w-0">
           <h3 className="font-semibold leading-tight">Agent enrollment</h3>
           <p className="text-sm text-muted-foreground">
-            Generate the install command + config your Windows agent consumes.
+            Enroll a machine you own with the reference agent — visible on the device by design.
           </p>
         </div>
       </div>
 
       <div className="mt-4 flex flex-col gap-3">
+        <div
+          role="tablist"
+          aria-label="Agent installer type"
+          className="glass-inset flex w-max gap-1 rounded-xl p-1"
+        >
+          {(
+            [
+              { id: 'node', label: 'Node agent (cross-platform)', ready: true },
+              { id: 'ps', label: 'PowerShell installer (planned)', ready: false },
+            ] as const
+          ).map((t) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={track === t.id}
+              onClick={() => setTrack(t.id)}
+              className={cn(
+                'rounded-lg px-3 py-1.5 text-xs font-medium transition-colors',
+                track === t.id
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {track === 'ps' ? (
+          <p className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+            <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+            The native Windows installer is not shipped yet — use the Node agent track for a working
+            enrollment today.
+          </p>
+        ) : null}
+
         <div className="glass-inset relative rounded-xl">
           <div className="flex items-center justify-between gap-2 border-b border-border/40 px-3 py-2">
             <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-              <TerminalSquare className="h-3.5 w-3.5" /> PowerShell — run as Administrator
+              <TerminalSquare className="h-3.5 w-3.5" />
+              {track === 'node' ? 'shell — on the target machine' : 'PowerShell — run as Administrator'}
             </span>
             <Button size="sm" variant="ghost" className="h-8 gap-1.5 px-2" onClick={() => void copyCmd()}>
               <Copy className="h-3.5 w-3.5" /> Copy
             </Button>
           </div>
           <pre className="scroll-slim overflow-x-auto px-3 py-2.5 font-mono text-xs leading-relaxed text-emerald-700 dark:text-emerald-300">
-            {installCmd}
+            {cmd}
           </pre>
         </div>
 
@@ -236,9 +286,20 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -H
         </div>
 
         <p className="text-xs text-muted-foreground">
-          The agent binary ships separately in the open-source repository — this kit generates the
-          config + install command it consumes. New enrollments raise an info alert (configurable
-          above) and appear in Devices automatically.
+          {track === 'node' ? (
+            <>
+              The reference agent lives in the repo&apos;s <code className="font-mono text-[11px]">agent/</code> folder
+              (plain Node.js, no build step). It reports real telemetry, execs real shell commands, shares a real
+              file-manager scope and streams real Windows screenshots — and it says so honestly when a capability
+              (mic/net/location capture) needs native code it doesn&apos;t ship. New enrollments raise an info alert
+              and appear in Devices automatically.
+            </>
+          ) : (
+            <>
+              This kit generates the config + install command the future native installer consumes. New enrollments
+              raise an info alert (configurable above) and appear in Devices automatically.
+            </>
+          )}
         </p>
       </div>
     </Panel>
@@ -573,7 +634,7 @@ export default function SettingsView() {
             </div>
             <div className="min-w-0 flex-1">
               <h3 className="font-semibold leading-tight">
-                About <span className="text-gradient">SentraRMM v0.1.9</span>
+                About <span className="text-gradient">SentraRMM v0.2.0</span>
               </h3>
               <p className="mt-1 text-sm text-muted-foreground">
                 Open-source, authorized-use RMM for your own fleet and security assessments.

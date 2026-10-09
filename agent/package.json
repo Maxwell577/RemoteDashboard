@@ -1,0 +1,17 @@
+{
+  "name": "sentrarmm-agent",
+  "version": "0.2.0",
+  "description": "SentraRMM reference agent — a transparent, user-visible remote management client for Windows/macOS/Linux. Talks to a SentraRMM hub over socket.io.",
+  "type": "module",
+  "main": "index.mjs",
+  "bin": { "sentrarmm-agent": "index.mjs" },
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "engines": { "node": ">=18.15" },
+  "keywords": ["rmm", "remote-management", "monitoring", "transparent"],
+  "license": "MIT",
+  "dependencies": {
+    "socket.io-client": "^4.8.4"
+  }
+}
