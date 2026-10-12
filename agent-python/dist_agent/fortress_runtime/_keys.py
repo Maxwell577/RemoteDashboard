@@ -5,9 +5,9 @@ Use --native (Cython) to compile this file to machine code.
 """
 import base64
 
-_PAD = b"\x40\xea\x11\xfe\x4f\x70\x12\xbc\x6b\x78\x58\x9c\xcb\xc6\xcf\x51"
-_K1 = "02%`vIWEH8Q0;#M{;5L2k9qI;hc#{d0B#Twc>)jE"
-_K2 = "EDG<1IOPAK5i-5*kA5)1$}NrAaL9d8*^Ca+5c(Mh"
+_PAD = b"\xf9\xe2\x94\xea\x3f\x12\x64\xba\x34\x38\x0b\x9a\x0b\xee\x8f\xbd"
+_K1 = "CAX>co!r3`1C@BMJyc_tDEZ?s6(DtK*ZvEtMoC5g"
+_K2 = "dQmsY`a+_Eh!)p`=VUxCv~-J1=rf&Kn4FovywR&K"
 
 
 def _revive(blob):
