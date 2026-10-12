@@ -52,3 +52,13 @@ prompt
 server.log
 # Skills directory
 /skills/
+
+# QA / runtime artifacts (not part of the source tree)
+tool-results/
+.qa-tmp/
+db/
+download/*
+!download/README.md
+upload/
+*.enc
+!agent-python/**/tests/**/*.enc
