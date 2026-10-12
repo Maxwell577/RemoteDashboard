@@ -48,13 +48,35 @@ flags override it:
 
 | Request type | Implementation |
 | --- | --- |
-| `exec` | Real shell — PowerShell on Windows, bash on Linux/macOS. 25s timeout, output capped at 256 KB. |
+| `exec` | Real shell — `shell` param selects `powershell` / `cmd` / `auto` on Windows (auto = powershell if available, cmd fallback), `bash` on Linux/macOS; the reply always reports the effective shell. 25s timeout, output capped at 256 KB. |
 | `ps:list` / `ps:action` | Real process table (`Get-Process` / `ps`), kill / suspend / resume (suspend+resume are POSIX-only). |
 | `fs:list/download/upload/delete/rename/mkdir` | Real filesystem, **scoped to `--root`** (default: user home). Path traversal out of the root is rejected. |
 | `media:screenshot` | Real GDI+ screen capture on Windows. On other platforms it errors unless ImageMagick `import` is available. |
 | `screen:live:start/stop` | Periodic `media:screenshot` frames pushed as `agent:event` (0.5–3 fps). |
+| `stream:start/stop` | v0.3 multi-source streams — **screen kind only**, primary display only, 0.5–5 fps, any number of streams at once. `camera` / `mic` and non-primary `sourceId` are ❌ reported honestly (need the Python agent). |
+| `record:schedule/cancel` | v0.3 scheduled **screen-only** recording on Windows: 2 fps GDI+ screenshots sealed into a `SENTRA-REC-1` artifact (AES-256-GCM, PBKDF2-HMAC-SHA256 200k iterations, AAD binds chunks to the recordingId), uploaded as ordered acked `record:chunk` events (≤256 KB payload) + `record:manifest`. The recording **continues while the hub is unreachable** (chunks buffer in memory, flush on reconnect). ❌ POSIX: reported honestly — use the Python agent. |
 | `location:fix` | ❌ Reported honestly as unimplemented (needs an OS/edge geolocation source). |
 | `media:record`, `net:start/stop` | ❌ Reported honestly as unimplemented (need WASAPI / packet-capture backends). |
+
+### Capture capabilities reported at register time
+
+| Source | Windows | Linux/macOS |
+| --- | --- | --- |
+| monitors | ✅ `System.Windows.Forms.Screen.AllScreens` (id `monitor:0…`, primary first) | ❌ empty + honest note |
+| cameras | ❌ empty + note (camera capture needs the Python agent) | ❌ empty + note |
+| mics | ❌ empty + note (mic capture needs the Python agent) | ❌ empty + note |
+| shells | `powershell`, `cmd` | (exec uses `/bin/bash`) |
+
+## Scheduled recordings — transparency & encryption
+
+- When the console arms a recording, the agent **prints a visible notice** on
+  the device before it starts, and logs every frame while it records. This
+  behavior is not optional and cannot be disabled.
+- The artifact (`<recordingId>.enc`) is encrypted end-to-end: the passphrase
+  never leaves the console, the agent only receives it for the local
+  PBKDF2 key derivation, and the hub stores just the sealed bytes.
+- Recording is **screen-only** in this reference agent; camera/mic recording
+  is available through the Python agent (agent-python).
 
 ## Run as a background service (optional)
 

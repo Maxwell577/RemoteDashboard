@@ -6,7 +6,14 @@ import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { useDash } from '@/lib/store'
 import { playAlertSound, playPresenceSound } from '@/lib/alert-sound'
-import type { Alert, Device, DeviceMetrics, ScreenFrame } from '@/lib/types'
+import type {
+  Alert,
+  Device,
+  DeviceMetrics,
+  RecordingArtifact,
+  ScreenFrame,
+  StreamFrame,
+} from '@/lib/types'
 
 /**
  * Mounted once inside the dashboard shell.
@@ -104,6 +111,78 @@ export default function Realtime() {
       const devices = qc.getQueryData<Device[]>(['devices'])
       const dev = devices?.find((d) => d.agentId === p.agentId)
       if (dev && dev.id !== p.agentId) setLiveFrame({ ...p, agentId: dev.id })
+    })
+
+    // ── v0.3 multi-source streams ────────────────────────────────────
+    // Frames are pushed per streamId; only the newest frame is kept per
+    // stream (the panels render a live image, not a buffer).
+    socket.on('stream:frame', (p: StreamFrame) => {
+      if (!p?.streamId) return
+      useDash.getState().setStreamFrame(p.streamId, {
+        dataUri: p.dataUri,
+        seq: p.seq,
+        ts: p.ts,
+        width: p.width,
+        height: p.height,
+        level: p.level,
+        at: Date.now(),
+      })
+    })
+
+    // Agent stopped/crashed/disconnected — drop the panel + toast.
+    socket.on(
+      'stream:ended',
+      (p: { agentId?: string; streamId: string; frames?: number; reason?: string }) => {
+        if (!p?.streamId) return
+        const stream = useDash.getState().activeStreams[p.streamId]
+        useDash.getState().removeStream(p.streamId)
+        const name = stream?.sourceName ?? 'stream'
+        if (p.reason) {
+          toast.warning(`Stream ended — ${name}`, { description: p.reason })
+        } else {
+          toast.info(`Stream ended — ${name}`, {
+            description: `${p.frames ?? '?'} frames delivered`,
+          })
+        }
+      },
+    )
+
+    // ── scheduled encrypted recordings ───────────────────────────────
+    // Upsert into the zustand mirror + invalidate the recordings cache
+    // (same pattern as alert:new). Toast only on state *transitions*.
+    socket.on('recording:update', (p: { recording: RecordingArtifact }) => {
+      const r = p?.recording
+      if (!r || (!r.id && !r.recordingId)) return
+      const artifact: RecordingArtifact = r.id ? r : { ...r, id: `live-${r.recordingId}` }
+      const prev = useDash.getState().recordingsLive[artifact.id]
+      useDash.getState().upsertRecording(artifact)
+      qc.invalidateQueries({ queryKey: ['recordings'] })
+      if (prev?.state === artifact.state) return
+      const label = artifact.label || artifact.recordingId
+      switch (artifact.state) {
+        case 'recording':
+          toast.info(`Recording started — ${label}`, {
+            description: 'on-device indicator is active',
+          })
+          break
+        case 'completed':
+          toast.success(`Recording completed — ${label}`, {
+            description: artifact.sizeBytes
+              ? `${artifact.frames ?? '?'} frames • encrypted .enc ready to download`
+              : 'encrypted .enc ready to download',
+          })
+          break
+        case 'failed':
+          toast.error(`Recording failed — ${label}`, {
+            description: artifact.error ?? 'agent reported a failure',
+          })
+          break
+        case 'canceled':
+          toast.info(`Recording canceled — ${label}`)
+          break
+        default:
+          break
+      }
     })
 
     return () => {

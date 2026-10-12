@@ -38,6 +38,8 @@ export interface Device {
   notes: string | null;
   /** maintenance window — new alerts for this device are suppressed server-side */
   maintenance: boolean;
+  /** enumerated capture sources (monitors/cameras/mics/shells) reported at agent:register; null = legacy agent */
+  captures: CaptureCapabilities | null;
 }
 
 export type CommandStatus =
@@ -580,3 +582,180 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (!json.ok) throw new Error(json.error || "Request failed");
   return json.data;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// v0.3 contract — multi-source streams, scheduled encrypted
+// recordings, shell selection, capture capabilities
+// ═══════════════════════════════════════════════════════════════════
+
+// ───────────────────── Shells & capture capabilities ───────────────
+
+/** Shells an agent can execute. "auto" = powershell first, cmd fallback. */
+export type ShellKind = "powershell" | "cmd";
+export type ExecShell = ShellKind | "auto";
+
+export interface MonitorSource {
+  id: string; // agent-side stable id, e.g. "monitor:0"
+  name: string; // "Display 1 (primary)"
+  width: number;
+  height: number;
+  primary: boolean;
+}
+
+export interface CameraSource {
+  id: string; // e.g. "camera:0"
+  name: string; // "Integrated Webcam"
+}
+
+export interface MicSource {
+  id: string; // e.g. "mic:default"
+  name: string; // "Microphone Array"
+}
+
+/**
+ * Everything an agent can capture, enumerated at register time and
+ * refreshable. Persisted on Device.captures (JSON) so the dashboard can
+ * schedule/plan even while the device is offline.
+ */
+export interface CaptureCapabilities {
+  monitors: MonitorSource[];
+  cameras: CameraSource[];
+  mics: MicSource[];
+  shells: ShellKind[]; // supported shells; "auto" always allowed
+  /** honest limitation notes shown in the UI, e.g. "camera enumeration needs the Python agent" */
+  notes?: string[];
+}
+
+// ─────────────────────── Multi-source live streams ─────────────────
+// Generalizes the v0.2 single `screen:live` channel. Any number of
+// streams may run simultaneously (e.g. screen + 2 cameras + mic).
+
+export type StreamKind = "screen" | "camera" | "mic";
+
+export interface StreamDescriptor {
+  streamId: string; // dashboard-generated (cuid/uuid)
+  kind: StreamKind;
+  sourceId?: string | null; // monitor/camera/mic id; null = default
+  fps?: number; // screen/camera target fps (cap 5 screen / 15 camera)
+  quality?: "480p" | "720p" | "1080p" | "source";
+}
+
+/** Socket event `stream:frame` (agent → hub → dashboard). */
+export interface StreamFrame {
+  agentId: string;
+  streamId: string;
+  kind: StreamKind;
+  dataUri?: string; // image/jpeg data URI (screen/camera); absent for mic levels
+  ts: number; // epoch ms at the agent
+  seq: number; // monotonically increasing per stream
+  width?: number;
+  height?: number;
+  /** mic streams only: input level 0..1 (RMS), ~8 Hz */
+  level?: number;
+}
+
+// Socket contract additions (hub on :3003, browser via io("/?XTransformPort=3003", { path: "/" })):
+//
+// Dashboard → hub (hub forwards to the agent as agent:request):
+//   agent request "stream:start" { ...StreamDescriptor }        ack { started: true, meta?: { width, height, fps } } | ack error
+//   agent request "stream:stop"  { streamId }                   → { frames: number }
+// Dashboard → hub socket (frame routing is push-only, no ack):
+//   "stream:stop"   { agentId, streamId }   (belt-and-braces stop for orphaned streams)
+// Hub → dashboard:
+//   "stream:frame"  StreamFrame
+//   "stream:ended"  { agentId, streamId, frames, reason? }
+//
+// Agents MUST stop all streams of a device when the agent disconnects; the
+// hub emits "stream:ended" for every active streamId of that agent.
+
+// ─────────────────── Scheduled encrypted recordings ────────────────
+// Transparency requirement: the agent announces the schedule to the device
+// user (notification) and shows a persistent on-screen indicator while
+// recording. These behaviors are non-optional and cannot be disabled by
+// config. Recording continues locally while the hub is unreachable.
+
+export type RecordingState =
+  | "armed" // accepted by agent, waiting to start (or counting down)
+  | "recording"
+  | "completed" // file sealed + uploaded to hub
+  | "failed"
+  | "canceled";
+
+export interface RecordingArtifact {
+  id: string; // DB id (cuid)
+  recordingId: string; // agent-side id (dashboard-generated, shared)
+  deviceId: string; // Device.id
+  label: string | null;
+  durationSec: number;
+  /** selected sources, e.g. { monitors:["monitor:0"], cameras:["camera:0"], mics:["mic:default"] } */
+  sources: { monitors?: string[]; cameras?: string[]; mics?: string[] } | null;
+  state: RecordingState;
+  fileName: string | null; // <recordingId>.enc
+  sizeBytes: number | null;
+  sha256: string | null; // integrity hash of the uploaded .enc file
+  encryption: string; // "AES-256-GCM"
+  kdf: string; // "PBKDF2-HMAC-SHA256"
+  kdfIterations: number; // 200000
+  /** first 12 hex chars of sha256(passphrase) — lets the user verify they typed the right key without storing it */
+  keyFingerprint: string | null;
+  frames: number | null;
+  error: string | null;
+  startedAt: string | null; // ISO
+  endedAt: string | null; // ISO
+  createdAt: string; // ISO
+  updatedAt: string; // ISO
+}
+
+/**
+ * Encrypted artifact format (<recordingId>.enc) — shared by all agents,
+ * the hub and tools/decrypt_recording.py:
+ *
+ *   Line 1 (ASCII, \n-terminated): JSON header
+ *     { magic: "SENTRA-REC-1", cipher: "AES-256-GCM", kdf: "PBKDF2-HMAC-SHA256",
+ *       iterations: 200000, salt: <b64 16B>, agentId, label?, durationSec,
+ *       sources: [...], startedAt: epochMs }
+ *   Then a sequence of framed records:
+ *     [u32 BE length][12B nonce][ciphertext][16B tag]
+ *     plaintext = JSON { t: epochMs, kind: "screen"|"camera"|"mic"|"meta",
+ *                        sourceId?, mime?: "image/jpeg", dataB64?, level? }
+ *   key = PBKDF2-HMAC-SHA256(passphrase, salt, iterations, 32 bytes)
+ *   AAD = first 16 bytes of sha256(recordingId) (binds chunks to the recording)
+ */
+
+// REST additions (standard { ok, data } envelope):
+//
+// GET  /api/recordings?deviceId=&limit=          → RecordingArtifact[]
+// POST /api/recordings                           body: { deviceId, durationSec, monitors?, cameras?, mics?, passphrase, label? }
+//                                                → RecordingArtifact (state "armed"); dispatches record:schedule
+// GET  /api/recordings/[id]                      → RecordingArtifact
+// DELETE /api/recordings/[id]                    → { ok } (cancels armed/recording via record:cancel, then deletes row + file)
+// GET  /api/recordings/[id]/download             → binary stream (application/octet-stream, filename <recordingId>.enc)
+//
+// Internal (hub → api, x-hub-token):
+// POST /api/internal/recording                   body: RecordingArtifact-shaped upsert { recordingId, ... } → { ok }
+//
+// Socket → dashboard:
+//   "recording:update" { recording: RecordingArtifact }
+//
+// Agent request types (hub → agent):
+//   "record:schedule" { recordingId, durationSec, monitors?, cameras?, mics?, passphrase, label?, noticeText? }
+//                     ack { accepted: true, state } | ack error (agent MUST notify the device user on accept)
+//   "record:cancel"   { recordingId }             ack { ok }
+// Agent → hub socket events (with ack where noted):
+//   "record:status"   { recordingId, state, elapsedSec?, sizeBytes?, frames?, error?, startedAt?, endedAt? }
+//   "record:chunk"    { recordingId, seq, dataB64 }   ack { ok, bytes } (256KB max payload per chunk, ordered by seq)
+//   "record:manifest" { recordingId, fileName, sizeBytes, sha256 }      ack { ok }
+//
+// Simulated agents cap recording duration at 120s (demo constraint); the
+// real Python/Node agents record the full requested duration.
+
+// ─────────────────────── exec shell selection ──────────────────────
+// agent request "exec" { command, shell?: ExecShell }  (default "powershell")
+//   → { output, exitCode, durationMs, shell: ShellKind | "bash" }  (shell = effective shell used)
+// "auto": try powershell, fall back to cmd when unavailable (Windows);
+//         the reply always reports the effective shell.
+// CommandExecution DB rows gain `effectiveShell: string | null`.
+
+// Device.captures (Device model): Json? column holding CaptureCapabilities,
+// persisted at agent:register; devices without captures (legacy) render
+// fallback pickers.

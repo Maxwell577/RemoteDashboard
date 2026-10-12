@@ -1,0 +1,876 @@
+     1→// Simulated PowerShell. Produces realistic multi-line output per device
+     2→// (hostname, LAN IP, MAC-derived link-local, hardware, virtual FS for `dir`).
+     3→
+     4→import type { Vfs } from "./vfs";
+     5→import type { ProcTable } from "./proc";
+     6→import type { DeviceDef } from "./devices";
+     7→import { pick, rndInt, sleep } from "../util";
+     8→
+     9→export interface ExecContext {
+    10→  def: DeviceDef;
+    11→  procTable: ProcTable;
+    12→  vfs: Vfs;
+    13→  uptimeSec: number;
+    14→  cpuPercent: number;
+    15→  memPercent: number;
+    16→}
+    17→
+    18→export interface ExecResult {
+    19→  output: string;
+    20→  exitCode: number;
+    21→  durationMs: number;
+    22→}
+    23→
+    24→// ── small text helpers ───────────────────────────────────────────────────
+    25→const w = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s.padEnd(n));
+    26→const wl = (s: string, n: number): string => (s.length > n ? s : s.padStart(n));
+    27→const num = (n: number): string => Math.round(n).toLocaleString("en-US");
+    28→
+    29→function fmtLong(d: Date): string {
+    30→  return d.toLocaleString("en-US", {
+    31→    year: "numeric",
+    32→    month: "numeric",
+    33→    day: "numeric",
+    34→    hour: "numeric",
+    35→    minute: "2-digit",
+    36→    second: "2-digit",
+    37→    hour12: true,
+    38→  });
+    39→}
+    40→
+    41→function fmtDirDate(d: Date): string {
+    42→  const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+    43→  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()} ${time}`;
+    44→}
+    45→
+    46→/** EUI-64 style link-local IPv6 derived from the device MAC. */
+    47→function linkLocal(mac: string): string {
+    48→  const hex = mac.replace(/:/g, "").toLowerCase();
+    49→  const first = (parseInt(hex.slice(0, 2), 16) ^ 0x02).toString(16).padStart(2, "0");
+    50→  return `fe80::${first}${hex.slice(2, 4)}:${hex.slice(4, 6)}ff:fe${hex.slice(6, 8)}:${hex.slice(8, 10)}${hex.slice(10, 12)}`;
+    51→}
+    52→
+    53→function notRecognized(cmd: string): string {
+    54→  return `${cmd} : The term '${cmd}' is not recognized as a name of a cmdlet, function, operable program, or script file. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+    55→At line:1 char:1
+    56→+ ${cmd}
+    57→+ ~~~~~
+    58→    + CategoryInfo          : ObjectNotFound: (${cmd}:String) [], CommandNotFoundException
+    59→    + FullyQualifiedErrorId : CommandNotFoundException`;
+    60→}
+    61→
+    62→// ── command implementations ──────────────────────────────────────────────
+    63→
+    64→function sysinfo(ctx: ExecContext): string {
+    65→  const d = ctx.def;
+    66→  const total = d.info.totalMemoryMB;
+    67→  const avail = Math.max(1024, Math.round(total * (1 - ctx.memPercent / 100)));
+    68→  const boot = fmtLong(new Date(Date.now() - ctx.uptimeSec * 1000));
+    69→  const install = fmtLong(new Date(Date.now() - 220 * 86_400_000));
+    70→  const lines = [
+    71→    `Host Name:                     ${d.info.hostname}`,
+    72→    `OS Name:                       ${d.info.osName}`,
+    73→    `OS Version:                    ${d.osBuild.split(".").slice(0, 3).join(".")} N/A Build ${d.osBuild.split(".")[2]}`,
+    74→    "OS Manufacturer:               Microsoft Corporation",
+    75→    `OS Configuration:              ${d.profile === "server" ? "Standalone Server" : "Standalone Workstation"}`,
+    76→    "OS Build Type:                 Multiprocessor Free",
+    77→    `Registered Owner:              ${d.userName}`,
+    78→    "Registered Organization:       Sentra Labs",
+    79→    `Product ID:                    00330-80000-00000-AA${rndInt(100, 999)}`,
+    80→    `Original Install Date:         ${install}`,
+    81→    `System Boot Time:              ${boot}`,
+    82→    `System Manufacturer:           ${d.sysManufacturer}`,
+    83→    `System Model:                  ${d.sysModel}`,
+    84→    "System Type:                   x64-based PC",
+    85→    "Processor(s):                  1 Processor(s) Installed.",
+    86→    `                               [01]: Intel64 Family 6 Model ${d.profile === "home" ? 161 : d.profile === "server" ? 128 : 167} Stepping 1 GenuineIntel ~${d.cpuMhz} Mhz`,
+    87→    `BIOS Version:                  ${d.biosVersion}`,
+    88→    "Windows Directory:             C:\\Windows",
+    89→    "System Directory:              C:\\Windows\\system32",
+    90→    "Boot Device:                   \\Device\\HarddiskVolume2",
+    91→    "System Locale:                 en-us;English (United States)",
+    92→    "Input Locale:                  en-us;English (United States)",
+    93→    "Time Zone:                     South Africa Standard Time",
+    94→    `Total Physical Memory:         ${num(total)} MB`,
+    95→    `Available Physical Memory:     ${num(avail)} MB`,
+    96→    `Virtual Memory: Max Size:      ${num(total * 2)} MB`,
+    97→    `Virtual Memory: Available:     ${num(total * 2 - (total - avail))} MB`,
+    98→    `Virtual Memory: In Use:        ${num(total - avail + rndInt(512, 4096))} MB`,
+    99→    "Page File Location(s):         C:\\pagefile.sys",
+   100→    "Domain:                        WORKGROUP",
+   101→    `Logon Server:                  \\\\${d.info.hostname}`,
+   102→    "Hotfix(s):                     N/A",
+   103→    "Network Card(s):               1 NIC(s) Installed.",
+   104→    `                               [01]: ${d.nicDescription}`,
+   105→    "                                     Connection Name: Ethernet",
+   106→    "                                     DHCP Enabled: Yes",
+   107→    "                                     DHCP Server: 192.168.1.1",
+   108→    "                                     IP address(es)",
+   109→    `                                     [01]: ${d.info.localIp}`,
+   110→    `                                     [02]: ${linkLocal(d.info.macAddress)}`,
+   111→  ];
+   112→  return lines.join("\n");
+   113→}
+   114→
+   115→function ipconfig(ctx: ExecContext, showAll: boolean): string {
+   116→  const d = ctx.def;
+   117→  const mac = d.info.macAddress.replace(/:/g, "-");
+   118→  const lines: string[] = ["", "Windows IP Configuration", ""];
+   119→
+   120→  const block = (title: string, ip: string, all: boolean, suffix: string): string[] => {
+   121→    if (!all) {
+   122→      return [
+   123→        `${title}:`, "",
+   124→        `   Connection-specific DNS Suffix  . : ${suffix}`,
+   125→        `   Link-local IPv6 Address . . . . . : ${linkLocal(d.info.macAddress)}%12`,
+   126→        `   IPv4 Address. . . . . . . . . . . : ${ip}`,
+   127→        "   Subnet Mask . . . . . . . . . . . : 255.255.255.0",
+   128→        `   Default Gateway . . . . . . . . . : ${suffix === "lan" ? "192.168.1.1" : ""}`,
+   129→        "",
+   130→      ];
+   131→    }
+   132→    return [
+   133→      `${title}:`, "",
+   134→      `   Connection-specific DNS Suffix  . : ${suffix}`,
+   135→      `   Description . . . . . . . . . . . : ${d.nicDescription}`,
+   136→      `   Physical Address. . . . . . . . . : ${mac}`,
+   137→      `   DHCP Enabled. . . . . . . . . . . : ${suffix === "lan" ? "Yes" : "No"}`,
+   138→      "   Autoconfiguration Enabled . . . . : Yes",
+   139→      `   Link-local IPv6 Address . . . . . : ${linkLocal(d.info.macAddress)}%12 (Preferred)`,
+   140→      `   IPv4 Address. . . . . . . . . . . : ${ip} (Preferred)`,
+   141→      "   Subnet Mask . . . . . . . . . . . : 255.255.255.0",
+   142→      ...(suffix === "lan"
+   143→        ? [
+   144→            `   Lease Obtained. . . . . . . . . . : ${fmtLong(new Date(Date.now() - 3 * 3_600_000))}`,
+   145→            `   Lease Expires . . . . . . . . . . : ${fmtLong(new Date(Date.now() + 21 * 3_600_000))}`,
+   146→            "   Default Gateway . . . . . . . . . : 192.168.1.1",
+   147→            "   DHCP Server . . . . . . . . . . . : 192.168.1.1",
+   148→            "   DNS Servers . . . . . . . . . . . : 192.168.1.1",
+   149→            "                                       1.1.1.1",
+   150→            "   NetBIOS over Tcpip. . . . . . . . : Enabled",
+   151→          ]
+   152→        : ["   Default Gateway . . . . . . . . . :", "   NetBIOS over Tcpip. . . . . . . . : Disabled"]),
+   153→      "",
+   154→    ];
+   155→  };
+   156→
+   157→  lines.push(...block("Ethernet adapter Ethernet", d.info.localIp, showAll, "lan"));
+   158→  if (d.profile === "server") {
+   159→    lines.push(...block("Ethernet adapter Lab-Isolated", "10.10.0.5", showAll, "lab.internal"));
+   160→  }
+   161→  return lines.join("\n").trimEnd();
+   162→}
+   163→
+   164→function tasklist(ctx: ExecContext): string {
+   165→  const rows = [
+   166→    "",
+   167→    `${w("Image Name", 25)}${wl("PID", 8)} ${w("Session Name", 16)}${w("Session#", 12)}${wl("Mem Usage", 12)}`,
+   168→    `${"=".repeat(25)} ${"=".repeat(8)} ${"=".repeat(16)}${"=".repeat(12)}${"=".repeat(12)}`,
+   169→    "System Idle Process              0 Services                   0          8 K",
+   170→  ];
+   171→  for (const p of ctx.procTable.list()) {
+   172→    const memK = Math.max(8, Math.round(p.memoryMB * 1024));
+   173→    const svc = p.user === "SYSTEM";
+   174→    rows.push(
+   175→      `${w(p.name, 25)}${wl(String(p.pid), 8)} ${w(svc ? "Services" : "Console", 16)}${w(svc ? "0" : "1", 12)}${wl(num(memK), 12)} K`,
+   176→    );
+   177→  }
+   178→  return rows.join("\n");
+   179→}
+   180→
+   181→function getProcess(ctx: ExecContext): string {
+   182→  const rows = [
+   183→    "",
+   184→    ` ${wl("NPM(K)", 7)}${wl("PM(M)", 10)}${wl("WS(M)", 10)}${wl("CPU(s)", 12)}${wl("Id", 9)}${wl("SI", 4)} ProcessName`,
+   185→    ` ${wl("------", 7)}${wl("-----", 10)}${wl("-----", 10)}${wl("------", 12)}${wl("--", 9)}${wl("--", 4)} -----------`,
+   186→  ];
+   187→  for (const p of ctx.procTable.list()) {
+   188→    rows.push(
+   189→      ` ${wl(String(rndInt(8, 40)), 7)}${wl((p.memoryMB * 0.82).toFixed(2), 10)}${wl(p.memoryMB.toFixed(2), 10)}${wl((p.cpuPercent * rndInt(20, 220)).toFixed(2), 12)}${wl(String(p.pid), 9)}${wl(p.user === "SYSTEM" ? "0" : "1", 4)} ${p.name.replace(/\.exe$/i, "")}`,
+   190→    );
+   191→  }
+   192→  return rows.join("\n");
+   193→}
+   194→
+   195→function getLocation(ctx: ExecContext): string {
+   196→  return `Path
+   197→----
+   198→C:\\Users\\${ctx.def.userName}`;
+   199→}
+   200→
+   201→function dir(ctx: ExecContext, target: string | null): { output: string; exitCode: number } {
+   202→  const fallback = `C:\\Users\\${ctx.def.userName}`;
+   203→  const path = target && /^[a-zA-Z]:/.test(target) ? target : fallback;
+   204→  let listing;
+   205→  try {
+   206→    listing = ctx.vfs.list(path);
+   207→  } catch {
+   208→    return {
+   209→      output: `dir : Cannot find path '${path}' because it does not exist.
+   210→At line:1 char:1
+   211→+ dir${target ? ` ${target}` : ""}
+   212→+ ~~~~~
+   213→    + CategoryInfo          : ObjectNotFound: (${path}:String) [Get-ChildItem], ItemNotFoundException
+   214→    + FullyQualifiedErrorId : DirIOPathNotFound,Microsoft.PowerShell.Commands.GetChildItemCommand`,
+   215→      exitCode: 1,
+   216→    };
+   217→  }
+   218→  const rows = [
+   219→    "",
+   220→    `    Directory: ${listing.path}`,
+   221→    "",
+   222→    "Mode                 LastWriteTime         Length Name",
+   223→    "----                 -------------         ------ ----",
+   224→  ];
+   225→  for (const e of listing.entries) {
+   226→    const mode = e.type === "directory" ? (e.hidden ? "d--h--" : "d-----") : e.hidden ? "-a-h--" : "-a----";
+   227→    const dt = fmtDirDate(new Date(e.modifiedAt));
+   228→    const len = e.type === "file" ? num(e.sizeBytes) : "";
+   229→    rows.push(`${mode}         ${dt.padStart(18)}${len.padStart(13)} ${e.name}`);
+   230→  }
+   231→  return { output: rows.join("\n"), exitCode: 0 };
+   232→}
+   233→
+   234→function getNetIpAddress(ctx: ExecContext): string {
+   235→  const d = ctx.def;
+   236→  const block = (ip: string, idx: number, alias: string, family: "IPv4" | "IPv6", prefix: number, origin: string): string[] => [
+   237→    "",
+   238→    `IPAddress         : ${ip}`,
+   239→    `InterfaceIndex    : ${idx}`,
+   240→    `InterfaceAlias    : ${alias}`,
+   241→    `AddressFamily     : ${family}`,
+   242→    "Type              : Unicast",
+   243→    `PrefixLength      : ${prefix}`,
+   244→    `PrefixOrigin      : ${origin}`,
+   245→    `SuffixOrigin      : ${family === "IPv4" ? "Dhcp" : "Link"}`,
+   246→    "AddressState      : Preferred",
+   247→    ...(family === "IPv4" ? ["ValidLifetime     : 22:59:42", "PreferredLifetime : 22:59:42"] : []),
+   248→    "SkipAsSource      : False",
+   249→    "PolicyStore       : ActiveStore",
+   250→  ];
+   251→  const rows: string[] = [];
+   252→  rows.push(...block(d.info.localIp, 12, "Ethernet", "IPv4", 24, "Dhcp"));
+   253→  rows.push(...block(linkLocal(d.info.macAddress), 12, "Ethernet", "IPv6", 64, "WellKnown"));
+   254→  rows.push(...block("127.0.0.1", 1, "Loopback Pseudo-Interface 1", "IPv4", 8, "Manual"));
+   255→  if (d.profile === "server") rows.push(...block("10.10.0.5", 18, "Lab-Isolated", "IPv4", 24, "Manual"));
+   256→  return rows.join("\n").trimStart();
+   257→}
+   258→
+   259→function netstat(ctx: ExecContext): string {
+   260→  const d = ctx.def;
+   261→  const ip = d.info.localIp;
+   262→  const rows = [
+   263→    "",
+   264→    "Active Connections",
+   265→    "",
+   266→    "  Proto  Local Address          Foreign Address        State",
+   267→  ];
+   268→  const listen = (addr: string, port: number): void => {
+   269→    rows.push(`  TCP    ${w(`${addr}:${port}`, 22)} ${w("0.0.0.0:0", 22)}LISTENING`);
+   270→  };
+   271→  listen("0.0.0.0", 135);
+   272→  listen("0.0.0.0", 445);
+   273→  listen("0.0.0.0", 5357);
+   274→  if (d.profile === "server") {
+   275→    listen("0.0.0.0", 3389);
+   276→    listen("0.0.0.0", 22);
+   277→    listen("0.0.0.0", 5985);
+   278→  } else {
+   279→    listen("0.0.0.0", 139);
+   280→    listen("0.0.0.0", 5040);
+   281→  }
+   282→  listen("[::]", 135);
+   283→  listen("[::]", 445);
+   284→  // the hub connection itself
+   285→  rows.push(`  TCP    ${w("127.0.0.1:3003", 22)} ${w(`127.0.0.1:${rndInt(49152, 65500)}`, 22)}ESTABLISHED`);
+   286→  const foreign = ["104.18.32.115", "142.250.72.68", "52.113.194.132", "13.107.42.14", "1.1.1.1", "93.184.216.34", "20.42.65.92", "151.101.1.69"];
+   287→  for (let i = 0; i < rndInt(6, 10); i++) {
+   288→    rows.push(`  TCP    ${w(`${ip}:${rndInt(49152, 65500)}`, 22)} ${w(`${pick(foreign)}:443`, 22)}ESTABLISHED`);
+   289→  }
+   290→  rows.push(`  TCP    ${w(`${ip}:${rndInt(49152, 65500)}`, 22)} ${w(`${pick(foreign)}:443`, 22)}TIME_WAIT`);
+   291→  rows.push(`  TCP    ${w(`${ip}:${rndInt(49152, 65500)}`, 22)} ${w(`${pick(foreign)}:80`, 22)}TIME_WAIT`);
+   292→  rows.push("  UDP    0.0.0.0:5353           *:*");
+   293→  rows.push("  UDP    0.0.0.0:68             *:*");
+   294→  rows.push("  UDP    [::]:500               *:*");
+   295→  return rows.slice(0, 44).join("\n");
+   296→}
+   297→
+   298→function getVolume(ctx: ExecContext): string {
+   299→  const rows = [
+   300→    "",
+   301→    `${w("DriveLetter", 12)}${w("FriendlyName", 13)}${w("FileSystemType", 15)}${w("DriveType", 10)}${w("HealthStatus", 13)}${w("OperationalStatus", 18)}${wl("SizeRemaining", 14)}${wl("Size", 10)}`,
+   302→    `${"-".repeat(11)} ${"-".repeat(12)} ${"-".repeat(14)} ${"-".repeat(9)} ${"-".repeat(12)} ${"-".repeat(17)}${"-".repeat(14)}${"-".repeat(10)}`,
+   303→  ];
+   304→  for (const v of ctx.def.volumes) {
+   305→    const remaining = v.sizeGb * (1 - ctx.def.diskPercent / 100);
+   306→    rows.push(
+   307→      `${w(v.letter, 12)}${w(v.label, 13)}${w("NTFS", 15)}${w("Fixed", 10)}${w("Healthy", 13)}${w("OK", 18)}${wl(`${remaining.toFixed(2)} GB`, 14)}${wl(`${v.sizeGb.toFixed(2)} GB`, 10)}`,
+   308→    );
+   309→  }
+   310→  return rows.join("\n");
+   311→}
+   312→
+   313→function getPsDrive(ctx: ExecContext): string {
+   314→  const rows = [
+   315→    "",
+   316→    `${w("Name", 6)}${w("Used (GB)", 11)}${w("Free (GB)", 11)}${w("Provider", 10)}${w("Root", 8)}${"CurrentLocation"}`,
+   317→  ];
+   318→  for (const v of ctx.def.volumes) {
+   319→    const used = v.sizeGb * (ctx.def.diskPercent / 100);
+   320→    const free = v.sizeGb - used;
+   321→    rows.push(
+   322→      `${w(v.letter.replace(":\\", ":"), 6)}${w(used.toFixed(2), 11)}${w(free.toFixed(2), 11)}${w("FileSystem", 10)}${w(v.letter, 8)}`,
+   323→    );
+   324→  }
+   325→  // PowerShell always lists the temp/variable drives too
+   326→  rows.push(`${w("Temp", 6)}${w("0.01", 11)}${w("0.49", 11)}${w("FileSystem", 10)}${w("Temp:\\", 8)}`);
+   327→  rows.push(`${w("A", 6)}${w("0.00", 11)}${w("0.01", 11)}${w("Variable", 10)}${w("A:\\", 8)}`);
+   328→  return rows.join("\n");
+   329→}
+   330→
+   331→function whoamiPriv(ctx: ExecContext): string {
+   332→  const rows: string[][] = ctx.def.profile === "server"
+   333→    ? [
+   334→        ["SeIncreaseQuotaPrivilege", "Adjust memory quotas for a process", "Enabled"],
+   335→        ["SeSecurityPrivilege", "Manage auditing and security log", "Disabled"],
+   336→        ["SeTakeOwnershipPrivilege", "Take ownership of files or other objects", "Disabled"],
+   337→        ["SeLoadDriverPrivilege", "Load and unload device drivers", "Enabled"],
+   338→        ["SeSystemProfilePrivilege", "Profile system performance", "Disabled"],
+   339→        ["SeSystemtimePrivilege", "Change the system time", "Disabled"],
+   340→        ["SeProfileSingleProcessPrivilege", "Profile single process", "Disabled"],
+   341→        ["SeRemoteShutdownPrivilege", "Force shutdown from a remote system", "Disabled"],
+   342→        ["SeRestorePrivilege", "Restore files and directories", "Enabled"],
+   343→        ["SeBackupPrivilege", "Back up files and directories", "Enabled"],
+   344→        ["SeShutdownPrivilege", "Shut down the system", "Disabled"],
+   345→        ["SeDebugPrivilege", "Debug programs", "Enabled"],
+   346→        ["SeChangeNotifyPrivilege", "Bypass traverse checking", "Enabled"],
+   347→        ["SeSystemEnvironmentPrivilege", "Modify firmware environment values", "Disabled"],
+   348→        ["SeManageVolumePrivilege", "Perform volume maintenance tasks", "Enabled"],
+   349→        ["SeIncreaseWorkingSetPrivilege", "Increase a process working set", "Enabled"],
+   350→      ]
+   351→    : [
+   352→        ["SeShutdownPrivilege", "Shut down the system", "Disabled"],
+   353→        ["SeChangeNotifyPrivilege", "Bypass traverse checking", "Enabled"],
+   354→        ["SeUndockPrivilege", "Remove computer from docking station", "Disabled"],
+   355→        ["SeIncreaseWorkingSetPrivilege", "Increase a process working set", "Enabled"],
+   356→        ["SeTimeZonePrivilege", "Change the time zone", "Disabled"],
+   357→      ];
+   358→  const lines = [
+   359→    "",
+   360→    "PRIVILEGES INFORMATION",
+   361→    "----------------------",
+   362→    "",
+   363→    "Privilege Name                Description                               State",
+   364→    "============================= ========================================= ========",
+   365→  ];
+   366→  for (const [name, desc, state] of rows) {
+   367→    lines.push(`${w(name, 30)}${w(desc, 42)}${state}`);
+   368→  }
+   369→  return lines.join("\n");
+   370→}
+   371→
+   372→function qwinsta(ctx: ExecContext): string {
+   373→  const d = ctx.def;
+   374→  const rows = [
+   375→    "",
+   376→    " SESSIONNAME       USERNAME       ID  STATE   TYPE     DEVICE",
+   377→    " services                           0  Disc",
+   378→  ];
+   379→  rows.push(`>console         ${w(d.userName, 14)}  ${w("1", 4)}Active`);
+   380→  if (d.profile === "server") rows.push(` rdp-tcp#0       ${w("auditor", 14)}  ${w("2", 4)}Active`);
+   381→  rows.push(" rdp-tcp                       65536  Listen");
+   382→  return rows.join("\n");
+   383→}
+   384→
+   385→// ── extended command set ────────────────────────────────────────────────
+   386→
+   387→function getDatePs(): string {
+   388→  const d = new Date();
+   389→  const long = d.toLocaleDateString("en-US", {
+   390→    weekday: "long",
+   391→    year: "numeric",
+   392→    month: "long",
+   393→    day: "numeric",
+   394→  });
+   395→  return `${long} ${d.toLocaleTimeString("en-US", { hour12: false })}`;
+   396→}
+   397→
+   398→const BASE_SERVICES: [string, string, boolean][] = [
+   399→  ["Audiosrv", "Windows Audio", true],
+   400→  ["BFE", "Base Filtering Engine", true],
+   401→  ["Dhcp", "DHCP Client", true],
+   402→  ["Dnscache", "DNS Client", true],
+   403→  ["EventLog", "Windows Event Log", true],
+   404→  ["gpsvc", "Group Policy Client", true],
+   405→  ["LanmanServer", "Server", true],
+   406→  ["LanmanWorkstation", "Workstation", true],
+   407→  ["Schedule", "Task Scheduler", true],
+   408→  ["Spooler", "Print Spooler", false],
+   409→  ["Themes", "Themes", true],
+   410→  ["W32Time", "Windows Time", true],
+   411→  ["WinDefend", "Microsoft Defender Antivirus Service", true],
+   412→  ["WSearch", "Windows Search", true],
+   413→  ["wuauserv", "Windows Update", false],
+   414→];
+   415→
+   416→const SERVER_SERVICES: [string, string, boolean][] = [
+   417→  ["IISADMIN", "IIS Admin Service", true],
+   418→  ["Netlogon", "Netlogon", true],
+   419→  ["W3SVC", "World Wide Web Publishing Service", true],
+   420→  ["RemoteRegistry", "Remote Registry", false],
+   421→];
+   422→
+   423→function getService(ctx: ExecContext, nameFilter: string | null): { output: string; exitCode: number } {
+   424→  const all = [...BASE_SERVICES, ...(ctx.def.profile === "server" ? SERVER_SERVICES : [])];
+   425→  const rows = [
+   426→    "",
+   427→    `${w("Status", 9)}${w("Name", 18)}DisplayName`,
+   428→    `${"-----".padEnd(9)}${"----".padEnd(18)}-----------`,
+   429→  ];
+   430→  const list = nameFilter
+   431→    ? all.filter(([n, dn]) => n.toLowerCase() === nameFilter.toLowerCase() || dn.toLowerCase().includes(nameFilter.toLowerCase()))
+   432→    : all;
+   433→  if (list.length === 0) {
+   434→    return {
+   435→      output: `Get-Service : Cannot find any service matching '${nameFilter}'.`,
+   436→      exitCode: 1,
+   437→    };
+   438→  }
+   439→  for (const [n, dn, running] of list) {
+   440→    rows.push(`${w(running ? "Running" : "Stopped", 9)}${w(n, 18)}${dn}`);
+   441→  }
+   442→  return { output: rows.join("\n"), exitCode: 0 };
+   443→}
+   444→
+   445→function getEventLog(ctx: ExecContext): string {
+   446→  const d = ctx.def;
+   447→  const sources =
+   448→    d.profile === "server"
+   449→      ? ["Microsoft-Windows-Security-Auditing", "DNS", "Service Control Manager", "Kernel-Power", "Schannel"]
+   450→      : ["Service Control Manager", "Kernel-Power", "WinDefend", "WMI", "User32"];
+   451→  const msgs = [
+   452→    "The service entered the running state.",
+   453→    "The system has rebooted after cleanly shutting down.",
+   454→    "Definition update completed successfully.",
+   455→    "A new device was detected and drivers installed.",
+   456→    "The WinRM service is listening for requests.",
+   457→    "An account was successfully logged on.",
+   458→    "Network link has been established.",
+   459→  ];
+   460→  const types: [string, string][] = [
+   461→    ["Information", "  "],
+   462→    ["Warning", "   "],
+   463→    ["Error", "     "],
+   464→  ];
+   465→  const rows = [
+   466→    "",
+   467→    `   Index Time          EntryType   Source                          InstanceID  Message`,
+   468→    `   ----- ----          ---------   ------                          ----------  -------`,
+   469→  ];
+   470→  for (let i = 0; i < 12; i++) {
+   471→    const [t, pad] = i % 5 === 3 ? types[1] : i % 9 === 7 ? types[2] : types[0];
+   472→    const dt = new Date(Date.now() - i * rndInt(400_000, 3_600_000));
+   473→    rows.push(
+   474→      `${wl(String(9412 - i * 7), 8)} ${fmtDirDate(dt).padEnd(18)}${w(t, 12)}${w(pick(sources), 32)}${wl(String(rndInt(1000, 50000)), 10)}${pad}${pick(msgs)}`,
+   475→    );
+   476→  }
+   477→  return rows.join("\n");
+   478→}
+   479→
+   480→function getNetAdapter(ctx: ExecContext): string {
+   481→  const d = ctx.def;
+   482→  const rows = [
+   483→    "",
+   484→    `${w("Name", 12)}${w("InterfaceDescription", 44)}${w("ifIndex", 9)}${w("Status", 10)}${wl("MacAddress", 18)}${wl("LinkSpeed", 12)}`,
+   485→    `${"----".padEnd(12)}${"--------------------".padEnd(44)}${"-------".padEnd(9)}${"------".padEnd(10)}${"----------".padEnd(18)}${"---------".padEnd(12)}`,
+   486→  ];
+   487→  const mac = d.info.macAddress;
+   488→  rows.push(`${w("Ethernet", 12)}${w(d.nicDescription, 44)}${w("12", 9)}${w("Up", 10)}${wl(mac, 18)}${wl("1 Gbps", 12)}`);
+   489→  if (d.profile === "server") {
+   490→    rows.push(`${w("Lab-Isolated", 12)}${w("Intel(R) Ethernet Server Adapter", 44)}${w("18", 9)}${w("Up", 10)}${wl("02-11-32-af-4c-07", 18)}${wl("10 Gbps", 12)}`);
+   491→  }
+   492→  rows.push(`${w("Bluetooth", 12)}${w("Intel(R) Wireless Bluetooth(R)", 44)}${w("17", 9)}${w("Disconnected", 10)}${wl("44-38-39-00-24-d1", 18)}${wl("", 12)}`);
+   493→  return rows.join("\n");
+   494→}
+   495→
+   496→function ping(target: string): { output: string; exitCode: number } {
+   497→  const host = target || "192.168.1.1";
+   498→  const ip = /^\d{1,3}(\.\d{1,3}){3}$/.test(host)
+   499→    ? host
+   500→    : `93.184.${(host.length * 7) % 250}.${(host.length * 13) % 250}`;
+   501→  const rows = [
+   502→    "",
+   503→    `Pinging ${host} [${ip}] with 32 bytes of data:`,
+   504→    "",
+   505→  ];
+   506→  for (let i = 0; i < 4; i++) rows.push(`Reply from ${ip}: bytes=32 time=${rndInt(2, 38)}ms TTL=${rndInt(48, 118)}`);
+   507→  rows.push(
+   508→    "",
+   509→    `Ping statistics for ${ip}:`,
+   510→    "    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),",
+   511→    "Approximate round trip times in milli-seconds:",
+   512→    `    Minimum = ${rndInt(2, 8)}ms, Maximum = ${rndInt(20, 40)}ms, Average = ${rndInt(9, 22)}ms`,
+   513→  );
+   514→  return { output: rows.join("\n"), exitCode: 0 };
+   515→}
+   516→
+   517→function getLocalUser(ctx: ExecContext): string {
+   518→  const d = ctx.def;
+   519→  const rows = [
+   520→    "",
+   521→    `${w("Name", 16)}${w("Enabled", 9)}${w("LastLogon", 22)}Description`,
+   522→    `${"----".padEnd(16)}${"-------".padEnd(9)}${"---------".padEnd(22)}-----------`,
+   523→  ];
+   524→  const users: [string, boolean, string][] = [
+   525→    ["Administrator", false, "Built-in account for administering the computer"],
+   526→    [d.userName, true, "Primary local user"],
+   527→    ["svc-backup", true, "Backup automation service account"],
+   528→    ["Guest", false, "Built-in account for guest access"],
+   529→  ];
+   530→  for (const [name, enabled, desc] of users) {
+   531→    const last = enabled ? fmtDirDate(new Date(Date.now() - rndInt(1, 30) * 3_600_000)) : "Never";
+   532→    rows.push(`${w(name, 16)}${w(enabled ? "True" : "False", 9)}${w(last, 22)}${desc}`);
+   533→  }
+   534→  return rows.join("\n");
+   535→}
+   536→
+   537→function getHotfix(): string {
+   538→  const rows = [
+   539→    "",
+   540→    `${w("HotFixID", 12)}${w("Description", 14)}${w("InstalledOn", 14)}InstalledBy`,
+   541→    `${"--------".padEnd(12)}${"-----------".padEnd(14)}${"-----------".padEnd(14)}-----------`,
+   542→  ];
+   543→  const fixes: [string, string, number][] = [
+   544→    ["KB5034123", "Security Update", 12],
+   545→    ["KB5034441", "Update", 38],
+   546→    ["KB5034848", "Security Update", 58],
+   547→    ["KB5035845", "Security Update", 74],
+   548→  ];
+   549→  for (const [id, desc, daysAgo] of fixes) {
+   550→    rows.push(`${w(id, 12)}${w(desc, 14)}${w(fmtDirDate(new Date(Date.now() - daysAgo * 86_400_000)), 14)}NT AUTHORITY\\SYSTEM`);
+   551→  }
+   552→  return rows.join("\n");
+   553→}
+   554→
+   555→function getCimOs(ctx: ExecContext): string {
+   556→  const d = ctx.def;
+   557→  const upSec = ctx.uptimeSec;
+   558→  const days = Math.floor(upSec / 86_400);
+   559→  const hours = Math.floor((upSec % 86_400) / 3_600);
+   560→  const minutes = Math.floor((upSec % 3_600) / 60);
+   561→  return [
+   562→    "",
+   563→    "SystemDirectory  : C:\\Windows\\system32",
+   564→    "Organization     : Sentra Labs",
+   565→    "BuildNumber      : " + d.osBuild.split(".")[2],
+   566→    "RegisteredUser   : " + d.userName,
+   567→    "SerialNumber     : 00330-80000-00000-AA" + rndInt(100, 999),
+   568→    "Version          : " + d.osBuild,
+   569→    "OSArchitecture   : 64-bit",
+   570→    `LastBootUpTime   : ${fmtLong(new Date(Date.now() - upSec * 1000))}`,
+   571→    `TotalVisibleMemorySize : ${num(d.info.totalMemoryMB * 1024)}`,
+   572→    `Uptime           : ${days}.${hours}:${minutes}:00`,
+   573→  ].join("\n");
+   574→}
+   575→
+   576→function arpA(ctx: ExecContext): string {
+   577→  const base = ctx.def.info.localIp.split(".").slice(0, 3).join(".");
+   578→  const rows = [
+   579→    "",
+   580→    `Interface: ${ctx.def.info.localIp} --- 0xc`,
+   581→    "  Internet Address      Physical Address      Type",
+   582→    `  ${base}.1            3c-84-6a-1f-22-d0     dynamic`,
+   583→    `  ${base}.255           ff-ff-ff-ff-ff-ff     static`,
+   584→    "  224.0.0.22            01-00-5e-00-00-16     static",
+   585→    "  239.255.255.250       01-00-5e-7f-ff-fa     static",
+   586→  ];
+   587→  for (let i = 0; i < 4; i++) {
+   588→    rows.push(`  ${base}.${rndInt(100, 250)}           ${rndHexMac()}     dynamic`);
+   589→  }
+   590→  return rows.join("\n");
+   591→}
+   592→
+   593→function rndHexMac(): string {
+   594→  const part = (): string => Math.floor(Math.random() * 256).toString(16).padStart(2, "0");
+   595→  return `${part()}-${part()}-${part()}-${part()}-${part()}-${part()}`;
+   596→}
+   597→
+   598→function routePrint(ctx: ExecContext): string {
+   599→  const base = ctx.def.info.localIp.split(".").slice(0, 3).join(".");
+   600→  return [
+   601→    "",
+   602→    "IPv4 Route Table",
+   603→    "===========================================================================",
+   604→    "Active Routes:",
+   605→    "Network Destination        Netmask          Gateway       Interface  Metric",
+   606→    `          0.0.0.0          0.0.0.0        ${base}.1     ${ctx.def.info.localIp}     25`,
+   607→    `        127.0.0.0        255.0.0.0         On-link         127.0.0.1    331`,
+   608→    `        ${base}.0      255.255.255.0         On-link    ${ctx.def.info.localIp}    281`,
+   609→    `     ${base}.255        255.255.255.255        On-link     ${ctx.def.info.localIp}    281`,
+   610→    "===========================================================================",
+   611→  ].join("\n");
+   612→}
+   613→
+   614→function getScheduledTask(ctx: ExecContext): string {
+   615→  const rows = [
+   616→    "",
+   617→    `${w("Status", 10)}${w("TaskName", 38)}TaskPath`,
+   618→    `${"------".padEnd(10)}${"--------".padEnd(38)}--------`,
+   619→  ];
+   620→  const tasks: [string, string, boolean][] = [
+   621→    ["Adobe Acrobat Update Task", "\\Adobe Acrobat Update Task\\", false],
+   622→    ["CreateExplorerShellUnelevatedTask", "\\Microsoft\\Windows\\Shell\\", true],
+   623→    ["MicrosoftEdgeUpdateTaskMachineCore", "\\MicrosoftEdgeUpdate\\", true],
+   624→    ["OneDrive Standalone Update Task", "\\OneDrive Standalone Update Task\\", true],
+   625→    ["ReconcileLanguageResources", "\\Microsoft\\Windows\\AppxDeploymentClient\\", false],
+   626→    ["Sentra Agent Watchdog", "\\SentraLabs\\", true],
+   627→    ["StartComponentCleanup", "\\Microsoft\\Windows\\Servicing\\", false],
+   628→  ];
+   629→  if (ctx.def.profile === "server") tasks.push(["Backup-LabNightly", "\\SentraLabs\\", true], ["Optimize-Disks", "\\Microsoft\\Windows\\Maintenance\\", false]);
+   630→  for (const [name, path, ready] of tasks) {
+   631→    rows.push(`${w(ready ? "Ready" : "Disabled", 10)}${w(name, 38)}${path}`);
+   632→  }
+   633→  return rows.join("\n");
+   634→}
+   635→
+   636→function envList(ctx: ExecContext): string {
+   637→  const d = ctx.def;
+   638→  const vars: [string, string][] = [
+   639→    ["COMPUTERNAME", d.info.hostname],
+   640→    ["NUMBER_OF_PROCESSORS", String(d.info.cpuCores)],
+   641→    ["OS", "Windows_NT"],
+   642→    ["PROCESSOR_ARCHITECTURE", "AMD64"],
+   643→    ["PROCESSOR_IDENTIFIER", d.info.cpuModel],
+   644→    ["PATH", "C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\"],
+   645→    ["SystemRoot", "C:\\Windows"],
+   646→    ["TEMP", `C:\\Users\\${d.userName}\\AppData\\Local\\Temp`],
+   647→    ["USERNAME", d.userName],
+   648→    ["USERPROFILE", `C:\\Users\\${d.userName}`],
+   649→    ["windir", "C:\\Windows"],
+   650→  ];
+   651→  const rows = ["", `${w("Name", 24)}Value`, `${"----".padEnd(24)}-----`];
+   652→  for (const [k, v] of vars) rows.push(`${w(k, 24)}${v}`);
+   653→  return rows.join("\n");
+   654→}
+   655→
+   656→function psVersionTable(ctx: ExecContext): string {
+   657→  return [
+   658→    "",
+   659→    "Name                           Value",
+   660→    "----                           -----",
+   661→    "PSVersion                      5.1.19041.3803",
+   662→    "PSEdition                      Desktop",
+   663→    `PSCompatibleVersions            {1.0, 2.0, 3.0, 4.0...}`,
+   664→    "BuildVersion                   10.0.19041.3803",
+   665→    `CLRVersion                     4.0.30319.42000`,
+   666→    "WSManStackVersion              3.0",
+   667→    `PSRemotingProtocolVersion      2.3`,
+   668→    `SerializationVersion           1.1.0.1`,
+   669→  ].join("\n").replace("19041.3803", ctx.def.osBuild.split(".")[2] + ".3803");
+   670→}
+   671→
+   672→function tracert(target: string): string {
+   673→  const host = target || "sentra.local";
+   674→  const ip = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? host : "142.250.72.68";
+   675→  const rows = [
+   676→    "",
+   677→    `Tracing route to ${host} [${ip}]`,
+   678→    "over a maximum of 30 hops:",
+   679→    "",
+   680→    "  1     1 ms     1 ms     1 ms  192.168.1.1",
+   681→  ];
+   682→  for (let i = 2; i <= 5; i++) {
+   683→    rows.push(`  ${i}    ${rndInt(4, 18)} ms   ${rndInt(4, 20)} ms   ${rndInt(4, 22)} ms  10.${i}0.${rndInt(0, 12)}.${rndInt(1, 250)}`);
+   684→  }
+   685→  rows.push(`  6    ${rndInt(9, 24)} ms   ${rndInt(9, 26)} ms   ${rndInt(9, 28)} ms  ${ip}`);
+   686→  rows.push("", "Trace complete.");
+   687→  return rows.join("\n");
+   688→}
+   689→
+   690→function nslookup(target: string): string {
+   691→  const host = target || "sentra.local";
+   692→  const ip = `93.184.${(host.length * 7) % 250}.${(host.length * 13) % 250}`;
+   693→  return [
+   694→    "",
+   695→    "Server:  OneSpeedy.one.one",
+   696→    "Address:  192.168.1.1",
+   697→    "",
+   698→    `Non-authoritative answer:`,
+   699→    `Name:    ${host}`,
+   700→    `Address:  ${ip}`,
+   701→  ].join("\n");
+   702→}
+   703→
+   704→function whoamiGroups(ctx: ExecContext): string {
+   705→  const rows = [
+   706→    "",
+   707→    "GROUP INFORMATION",
+   708→    "-----------------",
+   709→    "",
+   710→    "Group Name                             Type             SID          Attributes",
+   711→    "====================================== =============== ============ ==================================================",
+   712→    "Everyone                               Well-known group S-1-1-0      Mandatory group, Enabled by default, Enabled group",
+   713→    "BUILTIN\\Users                          Alias            S-1-5-32-545 Mandatory group, Enabled by default, Enabled group",
+   714→    "BUILTIN\\Performance Log Users          Alias            S-1-5-32-559 Mandatory group, Enabled by default, Enabled group",
+   715→    "NT AUTHORITY\\SERVICE                   Well-known group S-1-5-6      Mandatory group, Enabled by default, Enabled group",
+   716→    `NT AUTHORITY\\Authenticated Users       Well-known group S-1-5-11     Mandatory group, Enabled by default, Enabled group`,
+   717→  ];
+   718→  if (ctx.def.profile === "server") rows.splice(8, 0, "BUILTIN\\Administrators                   Alias            S-1-5-32-544 Mandatory group, Enabled by default, Enabled group");
+   719→  return rows.join("\n");
+   720→}
+   721→
+   722→// ── dispatcher ───────────────────────────────────────────────────────────
+   723→
+   724→export async function runCommand(command: string, ctx: ExecContext): Promise<ExecResult> {
+   725→  const trimmed = (command ?? "").trim();
+   726→  const lower = trimmed.toLowerCase();
+   727→  const t0 = Date.now();
+   728→
+   729→  let output: string;
+   730→  let exitCode = 0;
+   731→
+   732→  const dirCmd = /^(dir|ls|gci|get-childitem)(\s+(.*))?$/.exec(lower);
+   733→  const args = (cmd: string): string => trimmed.slice(cmd.length).trim();
+   734→
+   735→  if (lower === "sysinfo" || lower === "systeminfo" || lower === "get-computerinfo") {
+   736→    output = sysinfo(ctx);
+   737→  } else if (lower === "get-date" || lower === "date") {
+   738→    output = getDatePs();
+   739→  } else if (lower === "hostname") {
+   740→    output = ctx.def.info.hostname;
+   741→  } else if (lower === "whoami" || lower.startsWith("whoami ")) {
+   742→    if (lower.includes("/priv")) output = whoamiPriv(ctx);
+   743→    else if (lower.includes("/groups")) output = whoamiGroups(ctx);
+   744→    else output = `${ctx.def.info.hostname.toLowerCase()}\\${ctx.def.userName}`;
+   745→  } else if (lower.startsWith("echo ") || lower.startsWith("write-host ") || lower.startsWith("write-output ") || lower === "echo") {
+   746→    const text = lower === "echo" ? "" : trimmed.slice(trimmed.indexOf(" ") + 1);
+   747→    output = text.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
+   748→  } else if (lower.startsWith("ipconfig")) {
+   749→    output = ipconfig(ctx, lower.includes("/all"));
+   750→  } else if (lower.startsWith("ping ") || lower.startsWith("test-connection") || lower === "ping") {
+   751→    const target = lower.startsWith("ping ") ? args("ping") : lower.startsWith("test-connection ") ? args("test-connection") : "";
+   752→    const res = ping(target.replace(/-\w+\s+\S+\s*/g, "").trim());
+   753→    output = res.output;
+   754→    exitCode = res.exitCode;
+   755→  } else if (lower.startsWith("tracert") || lower.startsWith("pathping") || lower.startsWith("trace route")) {
+   756→    output = tracert(lower.startsWith("tracert ") ? args("tracert") : lower.startsWith("pathping ") ? args("pathping") : "");
+   757→  } else if (lower.startsWith("nslookup")) {
+   758→    output = nslookup(lower === "nslookup" ? "" : args("nslookup").replace(/^-\S+\s*/, ""));
+   759→  } else if (lower === "arp -a" || lower === "arp" || lower.startsWith("arp ")) {
+   760→    output = arpA(ctx);
+   761→  } else if (lower.startsWith("route print") || lower === "route") {
+   762→    output = routePrint(ctx);
+   763→  } else if (lower.startsWith("netstat")) {
+   764→    output = netstat(ctx);
+   765→  } else if (lower.startsWith("tasklist")) {
+   766→    output = tasklist(ctx);
+   767→  } else if (lower === "get-process" || lower === "ps" || lower.startsWith("get-process ") || lower.startsWith("ps ")) {
+   768→    const argStr = lower.startsWith("get-process ") ? args("get-process") : lower.startsWith("ps ") ? args("ps") : "";
+   769→    const nameMatch = /-name\s+([^\s]+|"[^"]+")/.exec(argStr);
+   770→    if (nameMatch) {
+   771→      const needle = nameMatch[1].replace(/"/g, "").toLowerCase();
+   772→      const filtered = ctx.procTable.list().filter((p) => p.name.toLowerCase().includes(needle));
+   773→      output = filtered.length === 0 ? `Get-Process : No process matches '${needle}'.` : getProcess(ctx).split("\n").slice(0, 3).concat(filtered.map((p) => ` ${wl(String(rndInt(8, 40)), 7)}${wl((p.memoryMB * 0.82).toFixed(2), 10)}${wl(p.memoryMB.toFixed(2), 10)}${wl((p.cpuPercent * rndInt(20, 220)).toFixed(2), 12)}${wl(String(p.pid), 9)}${wl(p.user === "SYSTEM" ? "0" : "1", 4)} ${p.name.replace(/\.exe$/i, "")}`)).join("\n");
+   774→      if (filtered.length === 0) exitCode = 1;
+   775→    } else {
+   776→      output = getProcess(ctx);
+   777→    }
+   778→  } else if (/^stop-process(\s|$)/.test(lower)) {
+   779→    const idMatch = /-id\s+(\d+)/.exec(lower);
+   780→    if (!idMatch) {
+   781→      output = "Stop-Process : A positional parameter cannot be found that accepts argument '-Name'. Use Stop-Process -Id <pid>.";
+   782→      exitCode = 1;
+   783→    } else {
+   784→      try {
+   785→        ctx.procTable.action(parseInt(idMatch[1], 10), "kill");
+   786→        output = "";
+   787→      } catch (e) {
+   788→        output = `Stop-Process : ${(e as Error).message}`;
+   789→        exitCode = 1;
+   790→      }
+   791→    }
+   792→  } else if (lower === "ver" || lower === "cmd /c ver") {
+   793→    output = `Microsoft Windows [Version ${ctx.def.osBuild}]`;
+   794→  } else if (lower === "get-location" || lower === "pwd" || lower === "gl") {
+   795→    output = getLocation(ctx);
+   796→  } else if (dirCmd) {
+   797→    const target = dirCmd[3] ? dirCmd[3].trim() : null;
+   798→    if (target && /^(env|variable)$/i.test(target.replace("env:", "env").split(":")[0])) {
+   799→      output = envList(ctx);
+   800→    } else {
+   801→      const res = dir(ctx, target && target !== "" && !target.startsWith("/") ? target : null);
+   802→      output = res.output;
+   803→      exitCode = res.exitCode;
+   804→    }
+   805→  } else if (lower === "get-netipaddress" || lower === "gip") {
+   806→    output = getNetIpAddress(ctx);
+   807→  } else if (lower.startsWith("get-netadapter")) {
+   808→    output = getNetAdapter(ctx);
+   809→  } else if (lower === "get-volume") {
+   810→    output = getVolume(ctx);
+   811→  } else if (lower.startsWith("get-psdrive") || lower.startsWith("gpsdrive")) {
+   812→    output = getPsDrive(ctx);
+   813→  } else if (lower === "qwinsta" || lower === "query session") {
+   814→    output = qwinsta(ctx);
+   815→  } else if (lower === "get-service" || lower.startsWith("get-service ") || lower === "gsv") {
+   816→    const raw = lower === "get-service" || lower === "gsv" ? "" : args(lower === "gsv" ? "gsv" : "get-service");
+   817→    const nameMatch = /-name\s+("[^"]+"|[^\s]+)/.exec(raw);
+   818→    const filter = nameMatch ? nameMatch[1].replace(/"/g, "") : raw.replace(/-\w+/, "").trim();
+   819→    const res = getService(ctx, filter || null);
+   820→    output = res.output;
+   821→    exitCode = res.exitCode;
+   822→  } else if (lower.startsWith("get-eventlog") || lower.startsWith("get-winevent")) {
+   823→    output = getEventLog(ctx);
+   824→  } else if (lower.startsWith("get-localuser")) {
+   825→    output = getLocalUser(ctx);
+   826→  } else if (lower.startsWith("get-hotfix")) {
+   827→    output = getHotfix();
+   828→  } else if (lower.startsWith("get-scheduledtask")) {
+   829→    output = getScheduledTask(ctx);
+   830→  } else if (/get-ciminstance|get-wmiobject/.test(lower) && /win32_operatingsystem/.test(lower)) {
+   831→    output = getCimOs(ctx);
+   832→  } else if (lower === "$psversiontable" || lower.startsWith("$psversiontable") || lower === "get-host" || lower === "$host" || lower.startsWith("get-host")) {
+   833→    output = psVersionTable(ctx);
+   834→  } else if (lower === "get-random") {
+   835→    output = String(rndInt(0, 2147483647));
+   836→  } else if (lower === "cls" || lower === "clear" || lower === "clear-host" || lower === "exit") {
+   837→    output = "";
+   838→  } else if (lower.startsWith("get-content") || lower.startsWith("gc ") || lower.startsWith("cat ") || lower.startsWith("type ")) {
+   839→    const raw = args(lower.startsWith("get-content") ? "get-content" : lower.slice(0, 3));
+   840→    const path = raw.replace(/-\w+\s+\S+\s*/g, "").replace(/"/g, "").trim();
+   841→    try {
+   842→      const dl = ctx.vfs.download(path);
+   843→      const text = Buffer.from(dl.contentBase64, "base64").toString("utf8");
+   844→      output = text
+   845→        .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "")
+   846→        .split("\n")
+   847→        .slice(0, 200)
+   848→        .join("\n");
+   849→    } catch (e) {
+   850→      output = `Get-Content : ${(e as Error).message}`;
+   851→      exitCode = 1;
+   852→    }
+   853→  } else if (lower === "get-help" || lower.startsWith("get-help ") || lower === "help" || lower === "man") {
+   854→    output = [
+   855→      "",
+   856→      "Simulated PowerShell session — available commands include:",
+   857→      "",
+   858→      "  systeminfo, get-computerinfo, get-date, hostname, whoami [/priv|/groups]",
+   859→      "  ipconfig [/all], get-netipaddress, get-netadapter, netstat, arp -a, route print",
+   860→      "  ping <host>, tracert <host>, nslookup <host>",
+   861→      "  get-process [-name x], stop-process -id <pid>, tasklist, get-service [-name x]",
+   862→      "  get-eventlog, get-localuser, get-hotfix, get-scheduledtask, get-volume, get-psdrive",
+   863→      "  dir [path], get-content <file>, get-childitem env:, $psversiontable, get-random",
+   864→      "",
+   865→    ].join("\n");
+   866→  } else {
+   867→    output = notRecognized(trimmed);
+   868→    exitCode = 1;
+   869→    await sleep(rndInt(40, 140));
+   870→    return { output, exitCode, durationMs: Date.now() - t0 };
+   871→  }
+   872→
+   873→  await sleep(rndInt(50, 400));
+   874→  return { output, exitCode, durationMs: Date.now() - t0 };
+   875→}
+   876→

@@ -1,0 +1,802 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useRef, useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { AnimatePresence, motion } from 'framer-motion'
+     6→import { toast } from 'sonner'
+     7→import {
+     8→  Camera,
+     9→  Clapperboard,
+    10→  Download,
+    11→  Eye,
+    12→  Info,
+    13→  Loader2,
+    14→  Lock,
+    15→  Mic,
+    16→  Monitor,
+    17→  MonitorPlay,
+    18→  PhoneCall,
+    19→  Play,
+    20→  ShieldCheck,
+    21→  Square,
+    22→  SquareTerminal,
+    23→  Trash2,
+    24→  Video,
+    25→  Zap,
+    26→  type LucideIcon,
+    27→} from 'lucide-react'
+    28→import {
+    29→  api,
+    30→  type AppSettings,
+    31→  type Device,
+    32→  type MediaAsset,
+    33→  type MediaKind,
+    34→  type MediaStatus,
+    35→  type StreamKind,
+    36→} from '@/lib/types'
+    37→import { useDash, type ActiveStream } from '@/lib/store'
+    38→import { cn } from '@/lib/utils'
+    39→import {
+    40→  DeviceSelector,
+    41→  EmptyState,
+    42→  ErrorBlock,
+    43→  LoadingBlock,
+    44→  Panel,
+    45→  SectionHeader,
+    46→  fmtBytes,
+    47→  fmtDate,
+    48→  timeAgo,
+    49→  useDevices,
+    50→} from '../shared'
+    51→import { Badge } from '@/components/ui/badge'
+    52→import { Button } from '@/components/ui/button'
+    53→import {
+    54→  Dialog,
+    55→  DialogContent,
+    56→  DialogDescription,
+    57→  DialogHeader,
+    58→  DialogTitle,
+    59→} from '@/components/ui/dialog'
+    60→import {
+    61→  AlertDialog,
+    62→  AlertDialogAction,
+    63→  AlertDialogCancel,
+    64→  AlertDialogContent,
+    65→  AlertDialogDescription,
+    66→  AlertDialogFooter,
+    67→  AlertDialogHeader,
+    68→  AlertDialogTitle,
+    69→  AlertDialogTrigger,
+    70→} from '@/components/ui/alert-dialog'
+    71→import { Input } from '@/components/ui/input'
+    72→import { Label } from '@/components/ui/label'
+    73→import {
+    74→  Select,
+    75→  SelectContent,
+    76→  SelectItem,
+    77→  SelectTrigger,
+    78→  SelectValue,
+    79→} from '@/components/ui/select'
+    80→import { Switch } from '@/components/ui/switch'
+    81→
+    82→// ─────────────────────────── helpers ────────────────────────────────
+    83→
+    84→const KIND_META: Record<MediaKind, { label: string; icon: LucideIcon }> = {
+    85→  screenshot: { label: 'Screenshot', icon: Camera },
+    86→  screen_record: { label: 'Screen recording', icon: MonitorPlay },
+    87→  mic_record: { label: 'Microphone only', icon: Mic },
+    88→  camera_stream: { label: 'Camera stream', icon: Video },
+    89→  call: { label: 'Video call', icon: PhoneCall },
+    90→}
+    91→
+    92→const ACTIVE_STATUSES: MediaStatus[] = ['requested', 'capturing', 'processing']
+    93→
+    94→const STREAM_KIND_META: Record<StreamKind, { label: string; icon: LucideIcon }> = {
+    95→  screen: { label: 'Screen', icon: Monitor },
+    96→  camera: { label: 'Camera', icon: Camera },
+    97→  mic: { label: 'Microphone', icon: Mic },
+    98→}
+    99→
+   100→const SCREEN_FPS = [1, 2, 3, 5]
+   101→const CAMERA_FPS = [5, 10, 15]
+   102→const QUALITIES = ['480p', '720p', '1080p', 'source'] as const
+   103→type Quality = (typeof QUALITIES)[number]
+   104→
+   105→function statusBadge(status: MediaStatus): { label: string; className: string; pulse: boolean } {
+   106→  switch (status) {
+   107→    case 'available':
+   108→      return {
+   109→        label: 'available',
+   110→        className: 'border-emerald-500/30 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
+   111→        pulse: false,
+   112→      }
+   113→    case 'capturing':
+   114→      return {
+   115→        label: 'capturing',
+   116→        className: 'border-amber-500/30 bg-amber-500/15 text-amber-600 dark:text-amber-400',
+   117→        pulse: true,
+   118→      }
+   119→    case 'requested':
+   120→      return {
+   121→        label: 'requested',
+   122→        className: 'border-amber-500/30 bg-amber-500/15 text-amber-600 dark:text-amber-400',
+   123→        pulse: true,
+   124→      }
+   125→    case 'processing':
+   126→      return {
+   127→        label: 'processing',
+   128→        className: 'border-teal-500/30 bg-teal-500/15 text-teal-600 dark:text-teal-400',
+   129→        pulse: true,
+   130→      }
+   131→    case 'failed':
+   132→      return {
+   133→        label: 'failed',
+   134→        className: 'border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400',
+   135→        pulse: false,
+   136→      }
+   137→    case 'stopped':
+   138→      return {
+   139→        label: 'stopped',
+   140→        className: 'border-zinc-500/30 bg-zinc-500/15 text-zinc-600 dark:text-zinc-400',
+   141→        pulse: false,
+   142→      }
+   143→  }
+   144→}
+   145→
+   146→function fmtElapsed(ms: number): string {
+   147→  const s = Math.max(0, Math.floor(ms / 1000))
+   148→  const h = Math.floor(s / 3600)
+   149→  const m = Math.floor((s % 3600) / 60)
+   150→  const sec = s % 60
+   151→  const pad = (n: number) => String(n).padStart(2, '0')
+   152→  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`
+   153→}
+   154→
+   155→function fmtDurationLabel(durationSec: number | null): string {
+   156→  if (!durationSec) return 'indefinite'
+   157→  if (durationSec < 60) return `${durationSec}s`
+   158→  if (durationSec < 3600) return `${Math.floor(durationSec / 60)} min`
+   159→  return `${Math.floor(durationSec / 3600)} h`
+   160→}
+   161→
+   162→// ─────────────────── capture capabilities strip ─────────────────────
+   163→
+   164→/**
+   165→ * Honest summary of what the agent says it can capture. Legacy agents
+   166→ * (captures === null) get an explicit "needs Python/Node agent" note
+   167→ * instead of a silently empty launcher.
+   168→ */
+   169→function CaptureStrip({ device }: { device: Device | null }) {
+   170→  if (!device) return null
+   171→  const caps = device.captures
+   172→  const hasAny =
+   173→    !!caps &&
+   174→    (caps.monitors.length > 0 || caps.cameras.length > 0 || caps.mics.length > 0)
+   175→
+   176→  if (!caps || !hasAny) {
+   177→    return (
+   178→      <div className="glass-inset flex items-start gap-2.5 rounded-2xl border-amber-500/30 px-4 py-3">
+   179→        <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" aria-hidden />
+   180→        <p className="text-sm text-muted-foreground">
+   181→          <span className="font-medium text-foreground">{device.hostname}</span> did not report
+   182→          capture sources — the Python/Node agent is required for multi-source streaming.
+   183→          Screenshots below still work through the legacy capture channel.
+   184→        </p>
+   185→      </div>
+   186→    )
+   187→  }
+   188→
+   189→  return (
+   190→    <div className="flex flex-wrap items-center gap-2">
+   191→      <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+   192→        Captures
+   193→      </span>
+   194→      <Badge variant="outline" className="gap-1 border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+   195→        <Monitor className="h-3 w-3" /> {caps.monitors.length} monitor{caps.monitors.length === 1 ? '' : 's'}
+   196→      </Badge>
+   197→      <Badge variant="outline" className="gap-1 border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400">
+   198→        <Camera className="h-3 w-3" /> {caps.cameras.length} camera{caps.cameras.length === 1 ? '' : 's'}
+   199→      </Badge>
+   200→      <Badge variant="outline" className="gap-1 border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-600 dark:text-fuchsia-400">
+   201→        <Mic className="h-3 w-3" /> {caps.mics.length} mic{caps.mics.length === 1 ? '' : 's'}
+   202→      </Badge>
+   203→      {caps.shells.length > 0 ? (
+   204→        <Badge variant="outline" className="gap-1 border-border/60 bg-background/40">
+   205→          <SquareTerminal className="h-3 w-3" /> {caps.shells.join(' · ')}
+   206→        </Badge>
+   207→      ) : null}
+   208→      {(caps.notes ?? []).map((n) => (
+   209→        <span key={n} className="text-[11px] text-muted-foreground/80" title="agent-reported limitation">
+   210→          {n}
+   211→        </span>
+   212→      ))}
+   213→    </div>
+   214→  )
+   215→}
+   216→
+   217→// ───────────────────── mic level meter (no image) ───────────────────
+   218→
+   219→/**
+   220→ * Animated input-level meter driven by `stream:frame` level (0..1, ~8 Hz).
+   221→ * The fill eases via CSS transition; a peak-hold marker decays slowly so
+   222→ * transient spikes stay readable.
+   223→ */
+   224→function MicLevelMeter({ level }: { level: number }) {
+   225→  const peakRef = useRef(0)
+   226→  const [peak, setPeak] = useState(0)
+   227→
+   228→  useEffect(() => {
+   229→    // rise instantly, decay ~0.02 per frame (~8 Hz updates)
+   230→    const next = Math.max(level, peakRef.current - 0.02)
+   231→    peakRef.current = next
+   232→    setPeak(next)
+   233→  }, [level])
+   234→
+   235→  const pct = Math.min(100, Math.max(0, Math.round(level * 100)))
+   236→  const peakPct = Math.min(99, Math.max(1, Math.round(peak * 100)))
+   237→
+   238→  return (
+   239→    <div className="flex flex-col items-center justify-center gap-5 px-6 py-12">
+   240→      <div className="glass-inset flex h-14 w-14 items-center justify-center rounded-2xl">
+   241→        <Mic
+   242→          className={cn(
+   243→            'h-6 w-6 transition-colors duration-200',
+   244→            pct > 4 ? 'text-rose-500' : 'text-muted-foreground',
+   245→          )}
+   246→          aria-hidden
+   247→        />
+   248→      </div>
+   249→      <div
+   250→        role="meter"
+   251→        aria-valuemin={0}
+   252→        aria-valuemax={100}
+   253→        aria-valuenow={pct}
+   254→        aria-label="Microphone input level"
+   255→        className="glass-inset relative h-3.5 w-full max-w-sm overflow-hidden rounded-full"
+   256→      >
+   257→        <div
+   258→          className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-rose-400 transition-[width] duration-150 ease-out"
+   259→          style={{ width: `${Math.max(2, pct)}%` }}
+   260→        />
+   261→        {/* peak-hold marker */}
+   262→        <span
+   263→          aria-hidden
+   264→          className="absolute top-0 h-full w-0.5 rounded-full bg-foreground/60 transition-[left] duration-150 ease-out"
+   265→          style={{ left: `calc(${peakPct}% - 1px)` }}
+   266→        />
+   267→      </div>
+   268→      <p className="font-mono text-xs tabular-nums text-muted-foreground">
+   269→        {pct}% input level · live
+   270→      </p>
+   271→    </div>
+   272→  )
+   273→}
+   274→
+   275→// ─────────────────────── live stream panel ──────────────────────────
+   276→
+   277→function StreamPanel({
+   278→  stream,
+   279→  now,
+   280→  onStop,
+   281→  stopping,
+   282→}: {
+   283→  stream: ActiveStream
+   284→  now: number
+   285→  onStop: (streamId: string) => void
+   286→  stopping: boolean
+   287→}) {
+   288→  const frame = useDash((s) => s.streamFrames[stream.streamId])
+   289→  const { data: devices } = useDevices()
+   290→  const hostname =
+   291→    devices?.find((d) => d.id === stream.deviceId)?.hostname ?? stream.agentId
+   292→
+   293→  // measured fps — trailing 5s window of frame arrivals, 1s ticker
+   294→  const timesRef = useRef<number[]>([])
+   295→  const [measuredFps, setMeasuredFps] = useState(0)
+   296→  const seq = frame?.seq ?? 0
+   297→
+   298→  useEffect(() => {
+   299→    if (seq === 0) return
+   300→    const t = Date.now()
+   301→    timesRef.current = [...timesRef.current, t].filter((x) => t - x <= 5000)
+   302→  }, [seq, frame?.at])
+   303→
+   304→  useEffect(() => {
+   305→    const iv = setInterval(() => {
+   306→      const t = Date.now()
+   307→      timesRef.current = timesRef.current.filter((x) => t - x <= 5000)
+   308→      setMeasuredFps(Math.round((timesRef.current.length / 5) * 10) / 10)
+   309→    }, 1000)
+   310→    return () => clearInterval(iv)
+   311→  }, [])
+   312→
+   313→  const meta = STREAM_KIND_META[stream.kind]
+   314→  const Icon = meta.icon
+   315→  const hasImage = stream.kind !== 'mic'
+   316→
+   317→  return (
+   318→    <motion.div
+   319→      layout
+   320→      variants={{
+   321→        hidden: { opacity: 0, y: 14, scale: 0.98 },
+   322→        show: {
+   323→          opacity: 1,
+   324→          y: 0,
+   325→          scale: 1,
+   326→          transition: { duration: 0.28, ease: 'easeOut' },
+   327→        },
+   328→      }}
+   329→      exit={{ opacity: 0, scale: 0.96, transition: { duration: 0.18 } }}
+   330→      className="glass glass-hover lift flex flex-col overflow-hidden rounded-2xl"
+   331→    >
+   332→      {/* header */}
+   333→      <div className="flex items-center gap-2.5 px-3.5 pb-2 pt-3">
+   334→        <span className="relative flex h-2.5 w-2.5 shrink-0" aria-hidden>
+   335→          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-70" />
+   336→          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-rose-500" />
+   337→        </span>
+   338→        <div className="glass-inset flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-primary">
+   339→          <Icon className="h-3.5 w-3.5" aria-hidden />
+   340→        </div>
+   341→        <div className="min-w-0 flex-1">
+   342→          <p className="truncate text-sm font-semibold leading-tight">{stream.sourceName}</p>
+   343→          <p className="truncate text-[11px] text-muted-foreground">
+   344→            {meta.label} · {hostname}
+   345→          </p>
+   346→        </div>
+   347→        <Badge
+   348→          variant="outline"
+   349→          className="shrink-0 border-rose-500/40 bg-rose-500/10 text-[10px] font-bold tracking-wider text-rose-600 dark:text-rose-400"
+   350→        >
+   351→          LIVE
+   352→        </Badge>
+   353→      </div>
+   354→
+   355→      {/* body */}
+   356→      {hasImage ? (
+   357→        frame?.dataUri ? (
+   358→          <img
+   359→            src={frame.dataUri}
+   360→            alt={`Live ${stream.kind} stream from ${stream.sourceName}`}
+   361→            className="max-h-56 w-full bg-black/50 object-contain sm:max-h-64"
+   362→            decoding="async"
+   363→          />
+   364→        ) : (
+   365→          <div className="flex h-40 w-full flex-col items-center justify-center gap-2 bg-black/30">
+   366→            <Loader2 className="h-5 w-5 animate-spin text-emerald-400" aria-hidden />
+   367→            <p className="text-xs text-zinc-400">waiting for first frame…</p>
+   368→          </div>
+   369→        )
+   370→      ) : (
+   371→        <MicLevelMeter level={frame?.level ?? 0} />
+   372→      )}
+   373→
+   374→      {/* footer */}
+   375→      <div className="flex flex-wrap items-center gap-1.5 px-3.5 py-2.5 text-[11px] text-muted-foreground">
+   376→        <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+   377→          {measuredFps > 0 ? `${measuredFps.toFixed(1)} fps` : `${stream.fps || '—'} fps target`}
+   378→        </Badge>
+   379→        <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+   380→          #{seq}
+   381→        </Badge>
+   382→        <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+   383→          {fmtElapsed(now - stream.startedAt)}
+   384→        </Badge>
+   385→        {hasImage && stream.quality ? (
+   386→          <Badge variant="secondary" className="font-mono text-[10px]">
+   387→            {stream.quality}
+   388→          </Badge>
+   389→        ) : null}
+   390→        <Button
+   391→          size="sm"
+   392→          variant="outline"
+   393→          className="ml-auto h-8 shrink-0 border-rose-500/40 text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 dark:hover:text-rose-300"
+   394→          disabled={stopping}
+   395→          onClick={() => onStop(stream.streamId)}
+   396→        >
+   397→          {stopping ? (
+   398→            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+   399→          ) : (
+   400→            <Square className="h-3.5 w-3.5" aria-hidden />
+   401→          )}
+   402→          Stop
+   403→        </Button>
+   404→      </div>
+   405→    </motion.div>
+   406→  )
+   407→}
+   408→
+   409→// ───────────────────── per-source launcher row ──────────────────────
+   410→
+   411→interface SourceConfig {
+   412→  fps: number
+   413→  quality: Quality
+   414→}
+   415→
+   416→function LauncherRow({
+   417→  kind,
+   418→  sourceId,
+   419→  name,
+   420→  meta,
+   421→  cfg,
+   422→  onCfg,
+   423→  active,
+   424→  busy,
+   425→  disabled,
+   426→  onStart,
+   427→  onStop,
+   428→}: {
+   429→  kind: StreamKind
+   430→  sourceId: string | null
+   431→  name: string
+   432→  meta: string | null
+   433→  cfg: SourceConfig
+   434→  onCfg: (sourceId: string, kind: StreamKind, patch: Partial<SourceConfig>) => void
+   435→  active: boolean
+   436→  busy: boolean
+   437→  disabled: boolean
+   438→  onStart: () => void
+   439→  onStop: () => void
+   440→}) {
+   441→  const key = sourceId ?? '__default__'
+   442→  return (
+   443→    <div
+   444→      className={cn(
+   445→        'flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl px-3 py-2.5 transition-colors',
+   446→        active ? 'bg-rose-500/5 ring-1 ring-rose-500/20' : 'hover:bg-primary/5',
+   447→      )}
+   448→    >
+   449→      <div className="min-w-0 flex-1 basis-40">
+   450→        <p className="flex items-center gap-1.5 truncate text-sm font-medium">
+   451→          {active ? (
+   452→            <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+   453→              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-70" />
+   454→              <span className="relative inline-flex h-2 w-2 rounded-full bg-rose-500" />
+   455→            </span>
+   456→          ) : null}
+   457→          {name}
+   458→        </p>
+   459→        {meta ? <p className="truncate text-[11px] text-muted-foreground">{meta}</p> : null}
+   460→      </div>
+   461→
+   462→      {kind !== 'mic' ? (
+   463→        <>
+   464→          <div className="flex items-center gap-1.5">
+   465→            <Label className="sr-only" htmlFor={`fps-${key}`}>
+   466→              Frames per second for {name}
+   467→            </Label>
+   468→            <Select
+   469→              value={String(cfg.fps)}
+   470→              onValueChange={(v) => onCfg(key, kind, { fps: Number(v) })}
+   471→              disabled={disabled || active}
+   472→            >
+   473→              <SelectTrigger
+   474→                id={`fps-${key}`}
+   475→                className="h-8 w-[74px] text-xs"
+   476→                aria-label={`FPS for ${name}`}
+   477→              >
+   478→                <SelectValue />
+   479→              </SelectTrigger>
+   480→              <SelectContent className="glass-overlay">
+   481→                {(kind === 'screen' ? SCREEN_FPS : CAMERA_FPS).map((f) => (
+   482→                  <SelectItem key={f} value={String(f)} className="text-xs">
+   483→                    {f} fps
+   484→                  </SelectItem>
+   485→                ))}
+   486→              </SelectContent>
+   487→            </Select>
+   488→          </div>
+   489→          <div className="flex items-center gap-1.5">
+   490→            <Label className="sr-only" htmlFor={`q-${key}`}>
+   491→              Quality for {name}
+   492→            </Label>
+   493→            <Select
+   494→              value={cfg.quality}
+   495→              onValueChange={(v) => onCfg(key, kind, { quality: v as Quality })}
+   496→              disabled={disabled || active}
+   497→            >
+   498→              <SelectTrigger
+   499→                id={`q-${key}`}
+   500→                className="h-8 w-[92px] text-xs"
+   501→                aria-label={`Quality for ${name}`}
+   502→              >
+   503→                <SelectValue />
+   504→              </SelectTrigger>
+   505→              <SelectContent className="glass-overlay">
+   506→                {QUALITIES.map((q) => (
+   507→                  <SelectItem key={q} value={q} className="text-xs">
+   508→                    {q === 'source' ? 'source' : q}
+   509→                  </SelectItem>
+   510→                ))}
+   511→              </SelectContent>
+   512→            </Select>
+   513→          </div>
+   514→        </>
+   515→      ) : null}
+   516→
+   517→      {active ? (
+   518→        <Button
+   519→          size="sm"
+   520→          variant="outline"
+   521→          className="h-8 shrink-0 border-rose-500/40 text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 dark:hover:text-rose-300"
+   522→          onClick={onStop}
+   523→        >
+   524→          <Square className="h-3.5 w-3.5" aria-hidden />
+   525→          Stop
+   526→        </Button>
+   527→      ) : (
+   528→        <Button size="sm" variant="outline" className="h-8 shrink-0 border-primary/40" disabled={disabled || busy} onClick={onStart}>
+   529→          {busy ? (
+   530→            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+   531→          ) : (
+   532→            <Play className="h-3.5 w-3.5" aria-hidden />
+   533→          )}
+   534→          Start
+   535→        </Button>
+   536→      )}
+   537→    </div>
+   538→  )
+   539→}
+   540→
+   541→// ───────────────────────── live view dialog ─────────────────────────
+   542→
+   543→/**
+   544→ * Live screen viewer — one-way socket stream (`screen:frame`).
+   545→ * Frames are rendered straight from the store; nothing is persisted.
+   546→ */
+   547→function LiveViewDialog({
+   548→  device,
+   549→  open,
+   550→  onOpenChange,
+   551→  now,
+   552→}: {
+   553→  device: Device | null
+   554→  open: boolean
+   555→  onOpenChange: (o: boolean) => void
+   556→  now: number
+   557→}) {
+   558→  const liveFrame = useDash((s) => s.liveFrame)
+   559→  const clearLiveFrame = useDash((s) => s.setLiveFrame)
+   560→  const { data: devices } = useDevices()
+   561→  const [fps, setFps] = useState(0)
+   562→  const frameTimes = useRef<number[]>([])
+   563→  const startedAt = useRef<number>(Date.now())
+   564→
+   565→  const frame = useMemo(() => {
+   566→    if (!liveFrame || !device) return null
+   567→    if (liveFrame.agentId === device.id) return liveFrame
+   568→    const matchesAgent = (devices ?? []).some(
+   569→      (d) => d.id === device.id && d.agentId === liveFrame.agentId,
+   570→    )
+   571→    return matchesAgent ? liveFrame : null
+   572→  }, [liveFrame, device, devices])
+   573→
+   574→  // record frame arrivals (one effect per frame, no timers)
+   575→  useEffect(() => {
+   576→    if (!open || frame?.seq == null) return
+   577→    const t = Date.now()
+   578→    frameTimes.current = [...frameTimes.current, t].filter((x) => t - x <= 4000)
+   579→  }, [open, frame?.seq])
+   580→
+   581→  // FPS meter — independent 1s ticker over the trailing 4s window
+   582→  useEffect(() => {
+   583→    if (!open) return
+   584→    const iv = setInterval(() => {
+   585→      const t = Date.now()
+   586→      frameTimes.current = frameTimes.current.filter((x) => t - x <= 4000)
+   587→      setFps(Math.round((frameTimes.current.length / 4) * 10) / 10)
+   588→    }, 1000)
+   589→    return () => clearInterval(iv)
+   590→  }, [open])
+   591→
+   592→  useEffect(() => {
+   593→    if (open) startedAt.current = Date.now()
+   594→  }, [open])
+   595→
+   596→  const stop = useMutation({
+   597→    mutationFn: () =>
+   598→      api<{ ok: true }>('/api/media/live', {
+   599→        method: 'POST',
+   600→        body: JSON.stringify({ deviceId: device?.id, action: 'stop' }),
+   601→      }),
+   602→    onSettled: () => clearLiveFrame(null),
+   603→  })
+   604→
+   605→  const handleClose = (o: boolean) => {
+   606→    if (!o && open) stop.mutate()
+   607→    onOpenChange(o)
+   608→  }
+   609→
+   610→  return (
+   611→    <Dialog open={open} onOpenChange={handleClose}>
+   612→      <DialogContent className="glass-strong sm:max-w-4xl">
+   613→        <DialogHeader>
+   614→          <DialogTitle className="flex items-center gap-2">
+   615→            <span className="relative flex h-2.5 w-2.5">
+   616→              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-70" />
+   617→              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-rose-500" />
+   618→            </span>
+   619→            Live view — {device?.hostname ?? 'device'}
+   620→          </DialogTitle>
+   621→          <DialogDescription>
+   622→            Realtime one-way stream over the agent socket · never persisted · encrypted transport
+   623→          </DialogDescription>
+   624→        </DialogHeader>
+   625→
+   626→        <div className="overflow-hidden rounded-xl ring-1 ring-border/60">
+   627→          {frame ? (
+   628→            <img
+   629→              src={frame.dataUri}
+   630→              alt={`Live screen of ${device?.hostname ?? 'device'}`}
+   631→              className="w-full object-contain"
+   632→            />
+   633→          ) : (
+   634→            <div className="terminal-glass flex h-72 w-full flex-col items-center justify-center gap-3">
+   635→              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+   636→              <p className="text-sm text-muted-foreground">Waiting for first frame…</p>
+   637→            </div>
+   638→          )}
+   639→        </div>
+   640→
+   641→        <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+   642→          <div className="flex flex-wrap items-center gap-2">
+   643→            <Badge variant="outline" className="border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400">
+   644→              LIVE
+   645→            </Badge>
+   646→            <Badge variant="secondary" className="font-mono text-[10px]">{fps} fps</Badge>
+   647→            <Badge variant="secondary" className="font-mono text-[10px]">
+   648→              frame #{frame?.seq ?? 0}
+   649→            </Badge>
+   650→            <Badge variant="secondary" className="font-mono text-[10px]">1600×900</Badge>
+   651→          </div>
+   652→          <div className="flex items-center gap-3">
+   653→            <span className="font-mono">{fmtElapsed(now - startedAt.current)} elapsed</span>
+   654→            <Button
+   655→              size="sm"
+   656→              variant="destructive"
+   657→              className="h-9"
+   658→              disabled={stop.isPending}
+   659→              onClick={() => handleClose(false)}
+   660→            >
+   661→              <Square className="h-3.5 w-3.5" /> Stop stream
+   662→            </Button>
+   663→          </div>
+   664→        </div>
+   665→      </DialogContent>
+   666→    </Dialog>
+   667→  )
+   668→}
+   669→
+   670→// ──────────────────────────── view ──────────────────────────────────
+   671→
+   672→export default function MediaView() {
+   673→  const qc = useQueryClient()
+   674→  const selectedDeviceId = useDash((s) => s.selectedDeviceId)
+   675→  const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
+   676→  const activeStreams = useDash((s) => s.activeStreams)
+   677→  const addStream = useDash((s) => s.addStream)
+   678→  const removeStream = useDash((s) => s.removeStream)
+   679→  const { data: devices } = useDevices()
+   680→
+   681→  const device = useMemo(
+   682→    () => (devices ?? []).find((d) => d.id === selectedDeviceId) ?? null,
+   683→    [devices, selectedDeviceId]
+   684→  )
+   685→
+   686→  // settings → encryption banner + default stream quality
+   687→  const { data: settings } = useQuery({
+   688→    queryKey: ['settings'],
+   689→    queryFn: () => api<AppSettings>('/api/settings'),
+   690→    staleTime: 60_000,
+   691→  })
+   692→
+   693→  const [kind, setKind] = useState<MediaKind>('screen_record')
+   694→  const [quality, setQuality] = useState<string | null>(null)
+   695→  const [durationSec, setDurationSec] = useState('60')
+   696→  const [withMic, setWithMic] = useState(false)
+   697→  const [preview, setPreview] = useState<MediaAsset | null>(null)
+   698→  const [liveOpen, setLiveOpen] = useState(false)
+   699→  const [now, setNow] = useState(() => Date.now())
+   700→
+   701→  // per-source launcher config (fps + quality), keyed by sourceId
+   702→  const [srcCfg, setSrcCfg] = useState<Record<string, SourceConfig>>({})
+   703→  const [startingKey, setStartingKey] = useState<string | null>(null)
+   704→  const [stoppingId, setStoppingId] = useState<string | null>(null)
+   705→
+   706→  const effectiveQuality = quality ?? settings?.defaultStreamQuality ?? '720p'
+   707→  const hasPassword = Boolean(settings?.capturePassword)
+   708→
+   709→  // 1s ticker for "elapsed" on active captures + stream panels
+   710→  useEffect(() => {
+   711→    const t = setInterval(() => setNow(Date.now()), 1000)
+   712→    return () => clearInterval(t)
+   713→  }, [])
+   714→
+   715→  const mediaQuery = useQuery({
+   716→    queryKey: ['media', selectedDeviceId],
+   717→    queryFn: () =>
+   718→      api<MediaAsset[]>(`/api/media?deviceId=${encodeURIComponent(String(selectedDeviceId))}&limit=60`),
+   719→    enabled: !!selectedDeviceId,
+   720→    refetchInterval: 8000,
+   721→  })
+   722→
+   723→  const invalidate = () => qc.invalidateQueries({ queryKey: ['media'] })
+   724→
+   725→  // ── multi-source stream control ─────────────────────────────────
+   726→
+   727→  const startStream = useMutation({
+   728→    mutationFn: (v: {
+   729→      kind: StreamKind
+   730→      sourceId: string | null
+   731→      sourceName: string
+   732→      fps?: number
+   733→      quality?: string
+   734→    }) =>
+   735→      api<{ streamId: string }>('/api/streams/start', {
+   736→        method: 'POST',
+   737→        body: JSON.stringify({
+   738→          deviceId: selectedDeviceId,
+   739→          kind: v.kind,
+   740→          sourceId: v.sourceId,
+   741→          fps: v.fps,
+   742→          quality: v.quality,
+   743→        }),
+   744→      }),
+   745→    onSuccess: (data, v) => {
+   746→      if (!data?.streamId) throw new Error('agent did not return a streamId')
+   747→      addStream({
+   748→        streamId: data.streamId,
+   749→        kind: v.kind,
+   750→        deviceId: selectedDeviceId ?? '',
+   751→        agentId: device?.agentId ?? '',
+   752→        sourceId: v.sourceId,
+   753→        sourceName: v.sourceName,
+   754→        fps: v.fps ?? 0,
+   755→        quality: v.quality ?? 'source',
+   756→        startedAt: Date.now(),
+   757→      })
+   758→      toast.success(`${STREAM_KIND_META[v.kind].label} stream started`, {
+   759→        description: `${v.sourceName} • ${v.fps ? `${v.fps} fps` : 'levels only'}${
+   760→          v.quality ? ` • ${v.quality}` : ''
+   761→        }`,
+   762→      })
+   763→    },
+   764→    onError: (e) =>
+   765→      toast.error('Stream failed to start', {
+   766→        description: e instanceof Error ? e.message : 'Unknown error',
+   767→      }),
+   768→    onSettled: () => setStartingKey(null),
+   769→  })
+   770→
+   771→  const stopStream = useMutation({
+   772→    mutationFn: (streamId: string) =>
+   773→      api<{ ok: true }>('/api/streams/stop', {
+   774→        method: 'POST',
+   775→        body: JSON.stringify({ streamId }),
+   776→      }),
+   777→    onSuccess: (_d, streamId) => {
+   778→      // keep the panel until the socket confirms — the button shows a spinner
+   779→      toast.success('Stop signal sent — stream is wrapping up')
+   780→      // Belt-and-braces: the hub normally broadcasts `stream:ended` after the
+   781→      // agent acks, but some dispatch paths skip the broadcast. If the panel
+   782→      // is still registered after a short grace period, retire it locally so
+   783→      // the UI never hangs. (removeStream is idempotent.)
+   784→      window.setTimeout(() => {
+   785→        if (useDash.getState().activeStreams[streamId]) {
+   786→          removeStream(streamId)
+   787→          toast.info('Stream ended')
+   788→        }
+   789→      }, 3000)
+   790→    },
+   791→    onError: (e) =>
+   792→      toast.error('Failed to stop stream', {
+   793→        description: e instanceof Error ? e.message : 'Unknown error',
+   794→      }),
+   795→    onSettled: () => setStoppingId(null),
+   796→  })
+   797→
+   798→  const stopAllStreams = useMutation({
+   799→    mutationFn: async (ids: string[]) => {
+   800→      await Promise.allSettled(
+
+[showing lines 1-800 of 1552; use offset=801 with limit to continue reading]

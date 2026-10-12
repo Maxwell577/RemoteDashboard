@@ -1,5 +1,7 @@
 // GET  /api/commands?deviceId=&limit= → CommandExecution[]
-// POST /api/commands  body: { deviceId, command } → CommandExecution (final state)
+// POST /api/commands  body: { deviceId, command, shell? } → CommandExecution (final state)
+//   shell: "powershell" (default) | "cmd" | "auto" — the agent reports the
+//   effective shell it used, persisted on CommandExecution.effectiveShell.
 import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
@@ -16,6 +18,7 @@ import { toCommand } from "@/lib/serialize";
 export const dynamic = "force-dynamic";
 
 const DANGEROUS_COMMAND = /(rm |del |format|Remove-Item|Stop-Process|shutdown)/i;
+const SHELLS = ["powershell", "cmd", "auto"] as const;
 
 export async function GET(req: NextRequest) {
   try {
@@ -36,16 +39,20 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await readBody<{ deviceId?: string; command?: string }>(req);
+    const body = await readBody<{ deviceId?: string; command?: string; shell?: string }>(req);
     if (!body?.deviceId || !body.command || body.command.trim() === "") {
       return err("deviceId and command are required", 400);
+    }
+    if (body.shell !== undefined && !(SHELLS as readonly string[]).includes(body.shell)) {
+      return err("shell must be one of: powershell, cmd, auto", 400);
     }
     const device = await resolveDevice(body.deviceId);
     if (!device) return err("Device not found", 404);
     const command = body.command;
+    const shell = body.shell ?? "powershell";
 
     let row = await db.commandExecution.create({
-      data: { deviceId: device.id, command, status: "pending" },
+      data: { deviceId: device.id, command, status: "pending", shell },
     });
     await writeAudit({
       deviceId: device.id,
@@ -58,7 +65,7 @@ export async function POST(req: NextRequest) {
     // the failure is recorded on the command row instead.
     let result: { ok: true; data: unknown } | { ok: false; error: string };
     try {
-      result = await dispatchToHub(device.agentId, "exec", { command }, {
+      result = await dispatchToHub(device.agentId, "exec", { command, shell }, {
         commandId: row.id,
         deviceId: device.id,
       });
@@ -71,6 +78,7 @@ export async function POST(req: NextRequest) {
         output?: unknown;
         exitCode?: unknown;
         durationMs?: unknown;
+        shell?: unknown;
       };
       const num = (v: unknown): number | null =>
         typeof v === "number" && Number.isFinite(v) ? Math.round(v) : null;
@@ -81,6 +89,7 @@ export async function POST(req: NextRequest) {
           output: typeof d.output === "string" ? d.output : "",
           exitCode: num(d.exitCode),
           durationMs: num(d.durationMs),
+          effectiveShell: typeof d.shell === "string" && d.shell !== "" ? d.shell : null,
           completedAt: new Date(),
         },
       });

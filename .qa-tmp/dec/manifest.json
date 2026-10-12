@@ -1,0 +1,53 @@
+{
+  "header": {
+    "magic": "SENTRA-REC-1",
+    "cipher": "AES-256-GCM",
+    "kdf": "PBKDF2-HMAC-SHA256",
+    "iterations": 200000,
+    "salt": "1AF7rHYMfLpVmPS4e6TMcA==",
+    "agentId": "py-test",
+    "recordingId": "testrec-synthetic-0001",
+    "label": "synthetic test",
+    "durationSec": 5,
+    "sources": [
+      "monitor:0",
+      "mic:0"
+    ],
+    "startedAt": 1791797030270
+  },
+  "decryptedAt": "2026-10-12T09:23:57Z",
+  "sha256": "835e9277fdd68d9b37873092fd72f2da262c0d7eff9f9a58b9249eccd6908544",
+  "summary": {
+    "frames": 2,
+    "micLevels": 5,
+    "metaRecords": 2
+  },
+  "frames": [
+    {
+      "file": "frame_000001.jpg",
+      "kind": "screen",
+      "sourceId": "monitor:0",
+      "t": 1791797030770
+    },
+    {
+      "file": "frame_000002.jpg",
+      "kind": "screen",
+      "sourceId": "monitor:0",
+      "t": 1791797031270
+    }
+  ],
+  "meta": [
+    {
+      "t": 1791797030270,
+      "kind": "meta",
+      "event": "recording-started",
+      "label": "synthetic"
+    },
+    {
+      "t": 1791797033270,
+      "kind": "meta",
+      "event": "recording-ended",
+      "state": "completed"
+    }
+  ]
+}

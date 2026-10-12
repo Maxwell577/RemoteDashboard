@@ -13,11 +13,12 @@ import {
   TriangleAlert,
 } from 'lucide-react'
 import { api, type CommandExecution, type SavedCommand } from '@/lib/types'
-import { useDash } from '@/lib/store'
+import { useDash, type ExecShellPref } from '@/lib/store'
 import {
   DeviceSelector,
   Panel,
   SectionHeader,
+  SegmentedControl,
   StatusDot,
   timeAgo,
   useDevices,
@@ -28,7 +29,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 
-const QUICK_COMMANDS = [
+const QUICK_COMMANDS_PS = [
   'sysinfo',
   'ipconfig /all',
   'Get-Process',
@@ -37,6 +38,27 @@ const QUICK_COMMANDS = [
   'Get-Volume',
   'qwinsta',
 ] as const
+
+const QUICK_COMMANDS_CMD = [
+  'ipconfig /all',
+  'tasklist',
+  'ver',
+  'systeminfo',
+  'whoami',
+] as const
+
+/** POST /api/commands body — effectiveShell arrives once the v0.3 backend lands. */
+type CommandResult = CommandExecution & { effectiveShell?: string | null }
+
+/**
+ * Chip label when the effective shell differs from what was requested
+ * ("auto" fell back to cmd, or the agent ran bash on posix). null = no chip.
+ */
+function shellChipLabel(requested: ExecShellPref, effective?: string | null): string | null {
+  if (!effective) return null
+  if (requested === 'auto') return effective === 'powershell' ? null : effective
+  return effective === requested ? null : effective
+}
 
 interface TerminalEntry {
   id: string
@@ -48,6 +70,10 @@ interface TerminalEntry {
   durationMs: number | null
   /** set when the entry came from a broadcast run (target hostname) */
   host?: string
+  /** shell the operator requested for this entry (powershell | cmd | auto) */
+  requestedShell: ExecShellPref
+  /** shell the agent actually used, when reported ("cmd" fallback, "bash" on posix) */
+  effectiveShell?: string | null
 }
 
 function uid(): string {
@@ -63,6 +89,8 @@ function errMsg(e: unknown): string {
 export default function Terminal() {
   const selectedDeviceId = useDash((s) => s.selectedDeviceId)
   const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
+  const execShell = useDash((s) => s.execShell)
+  const setExecShell = useDash((s) => s.setExecShell)
   const { data: devices } = useDevices()
   const device = devices?.find((d) => d.id === selectedDeviceId) ?? null
   const online = device?.status === 'online'
@@ -111,9 +139,9 @@ export default function Terminal() {
 
   const runCmd = useMutation({
     mutationFn: async (v: { deviceId: string; command: string; entryId: string }) =>
-      api<CommandExecution>('/api/commands', {
+      api<CommandResult>('/api/commands', {
         method: 'POST',
-        body: JSON.stringify({ deviceId: v.deviceId, command: v.command }),
+        body: JSON.stringify({ deviceId: v.deviceId, command: v.command, shell: execShell }),
       }),
     onSuccess: (data, v) => {
       const failed = data.status === 'failed' || data.status === 'timeout'
@@ -126,6 +154,7 @@ export default function Terminal() {
                 output: data.output,
                 exitCode: data.exitCode,
                 durationMs: data.durationMs,
+                effectiveShell: data.effectiveShell ?? null,
               }
             : e,
         ),
@@ -169,6 +198,7 @@ export default function Terminal() {
           exitCode: null,
           durationMs: null,
           host: b.host,
+          requestedShell: execShell,
         })),
       ])
       setHistory((prev) => [...prev.slice(-49), cmd])
@@ -176,9 +206,9 @@ export default function Terminal() {
       setInput('')
       setBroadcastBusy(true)
       const results = batch.map((b) =>
-        api<CommandExecution>('/api/commands', {
+        api<CommandResult>('/api/commands', {
           method: 'POST',
-          body: JSON.stringify({ deviceId: b.deviceId, command: cmd }),
+          body: JSON.stringify({ deviceId: b.deviceId, command: cmd, shell: execShell }),
         })
           .then((data) => {
             const failed = data.status === 'failed' || data.status === 'timeout'
@@ -191,6 +221,7 @@ export default function Terminal() {
                       output: data.output,
                       exitCode: data.exitCode,
                       durationMs: data.durationMs,
+                      effectiveShell: data.effectiveShell ?? null,
                     }
                   : e,
               ),
@@ -235,6 +266,7 @@ export default function Terminal() {
         output: null,
         exitCode: null,
         durationMs: null,
+        requestedShell: execShell,
       },
     ])
     setHistory((prev) => [...prev.slice(-49), cmd])
@@ -283,7 +315,7 @@ export default function Terminal() {
     <div className="flex flex-col gap-4">
       <SectionHeader
         title="Command console"
-        subtitle="Execute PowerShell commands on a selected device"
+        subtitle="Execute PowerShell / CMD commands on a selected device — shell selectable, agent reports the effective one"
         icon={<SquareTerminal className="h-5 w-5" />}
         actions={
           <>
@@ -403,10 +435,31 @@ export default function Terminal() {
 
           <div className="flex flex-col gap-2">
             <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Shell
+            </p>
+            <SegmentedControl<ExecShellPref>
+              label="Shell"
+              value={execShell}
+              onChange={setExecShell}
+              options={[
+                { value: 'powershell', label: 'PS', title: 'Run via Windows PowerShell (default)' },
+                { value: 'cmd', label: 'CMD', title: 'Run via the Windows Command Prompt' },
+                {
+                  value: 'auto',
+                  label: 'Auto',
+                  title: 'Auto — PowerShell with CMD fallback',
+                },
+              ]}
+              className="w-max"
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               Quick commands
             </p>
             <div className="flex flex-col gap-1.5">
-              {QUICK_COMMANDS.map((cmd) => (
+              {(execShell === 'cmd' ? QUICK_COMMANDS_CMD : QUICK_COMMANDS_PS).map((cmd) => (
                 <Button
                   key={cmd}
                   variant="ghost"
@@ -451,7 +504,7 @@ export default function Terminal() {
           <Panel className="flex min-w-0 flex-1 flex-col overflow-hidden p-0">
             <div className="terminal-glass flex items-center justify-between gap-2 px-4 py-2">
               <span className="truncate font-mono text-xs text-emerald-300">
-                PS &gt;{' '}
+                {execShell === 'cmd' ? 'CMD' : 'PS'} &gt;{' '}
                 {broadcast
                   ? `broadcast → ${onlineDevices.length} online`
                   : device?.hostname ?? 'no device'}
@@ -488,16 +541,27 @@ export default function Terminal() {
                 </div>
               ) : (
                 <div className="flex flex-col gap-4">
-                  {entries.map((e) => (
+                  {entries.map((e) => {
+                    const chip = shellChipLabel(e.requestedShell, e.effectiveShell)
+                    return (
                     <div key={e.id} className="flex flex-col gap-1">
                       <p className="flex flex-wrap items-center gap-2 font-semibold text-emerald-300">
-                        <span>PS C:\&gt; {e.command}</span>
+                        <span>{e.requestedShell === 'cmd' ? 'CMD' : 'PS'} C:\&gt; {e.command}</span>
                         {e.host ? (
                           <Badge
                             variant="outline"
                             className="border-teal-500/30 bg-teal-500/10 px-1.5 py-0 font-mono text-[10px] font-medium text-teal-600 dark:text-teal-400"
                           >
                             {e.host}
+                          </Badge>
+                        ) : null}
+                        {chip ? (
+                          <Badge
+                            variant="outline"
+                            title={`agent executed this via the ${chip} shell`}
+                            className="border-amber-500/30 bg-amber-500/10 px-1.5 py-0 font-mono text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                          >
+                            {chip}
                           </Badge>
                         ) : null}
                       </p>
@@ -522,7 +586,8 @@ export default function Terminal() {
                         </p>
                       )}
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -547,13 +612,15 @@ export default function Terminal() {
                 placeholder={
                   broadcast
                     ? `Broadcast to ${onlineDevices.length} online devices…`
-                    : 'e.g. Get-Process | Select-Object -First 10'
+                    : execShell === 'cmd'
+                      ? 'e.g. systeminfo'
+                      : 'e.g. Get-Process | Select-Object -First 10'
                 }
                 className="h-11 min-w-0 flex-1 border-white/10 bg-white/5 font-mono text-[13px] text-zinc-100 placeholder:text-zinc-500"
                 disabled={(!selectedDeviceId && !broadcast) || (broadcast && onlineDevices.length === 0)}
                 spellCheck={false}
                 autoComplete="off"
-                aria-label="PowerShell command"
+                aria-label={execShell === 'cmd' ? 'Command Prompt command' : 'PowerShell command'}
               />
               <Button
                 size="sm"

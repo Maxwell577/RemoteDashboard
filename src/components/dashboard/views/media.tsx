@@ -2,19 +2,24 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { AnimatePresence, motion } from 'framer-motion'
 import { toast } from 'sonner'
 import {
   Camera,
   Clapperboard,
   Download,
   Eye,
+  Info,
   Loader2,
   Lock,
   Mic,
+  Monitor,
   MonitorPlay,
   PhoneCall,
+  Play,
   ShieldCheck,
   Square,
+  SquareTerminal,
   Trash2,
   Video,
   Zap,
@@ -27,8 +32,9 @@ import {
   type MediaAsset,
   type MediaKind,
   type MediaStatus,
+  type StreamKind,
 } from '@/lib/types'
-import { useDash } from '@/lib/store'
+import { useDash, type ActiveStream } from '@/lib/store'
 import { cn } from '@/lib/utils'
 import {
   DeviceSelector,
@@ -85,6 +91,17 @@ const KIND_META: Record<MediaKind, { label: string; icon: LucideIcon }> = {
 
 const ACTIVE_STATUSES: MediaStatus[] = ['requested', 'capturing', 'processing']
 
+const STREAM_KIND_META: Record<StreamKind, { label: string; icon: LucideIcon }> = {
+  screen: { label: 'Screen', icon: Monitor },
+  camera: { label: 'Camera', icon: Camera },
+  mic: { label: 'Microphone', icon: Mic },
+}
+
+const SCREEN_FPS = [1, 2, 3, 5]
+const CAMERA_FPS = [5, 10, 15]
+const QUALITIES = ['480p', '720p', '1080p', 'source'] as const
+type Quality = (typeof QUALITIES)[number]
+
 function statusBadge(status: MediaStatus): { label: string; className: string; pulse: boolean } {
   switch (status) {
     case 'available':
@@ -140,6 +157,418 @@ function fmtDurationLabel(durationSec: number | null): string {
   if (durationSec < 60) return `${durationSec}s`
   if (durationSec < 3600) return `${Math.floor(durationSec / 60)} min`
   return `${Math.floor(durationSec / 3600)} h`
+}
+
+// ─────────────────── capture capabilities strip ─────────────────────
+
+/**
+ * Honest summary of what the agent says it can capture. Legacy agents
+ * (captures === null) get an explicit "needs Python/Node agent" note
+ * instead of a silently empty launcher.
+ */
+function CaptureStrip({ device }: { device: Device | null }) {
+  if (!device) return null
+  const caps = device.captures
+  const hasAny =
+    !!caps &&
+    (caps.monitors.length > 0 || caps.cameras.length > 0 || caps.mics.length > 0)
+
+  if (!caps || !hasAny) {
+    return (
+      <div className="glass-inset flex items-start gap-2.5 rounded-2xl border-amber-500/30 px-4 py-3">
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" aria-hidden />
+        <p className="text-sm text-muted-foreground">
+          <span className="font-medium text-foreground">{device.hostname}</span> did not report
+          capture sources — the Python/Node agent is required for multi-source streaming.
+          Screenshots below still work through the legacy capture channel.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        Captures
+      </span>
+      <Badge variant="outline" className="gap-1 border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+        <Monitor className="h-3 w-3" /> {caps.monitors.length} monitor{caps.monitors.length === 1 ? '' : 's'}
+      </Badge>
+      <Badge variant="outline" className="gap-1 border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400">
+        <Camera className="h-3 w-3" /> {caps.cameras.length} camera{caps.cameras.length === 1 ? '' : 's'}
+      </Badge>
+      <Badge variant="outline" className="gap-1 border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-600 dark:text-fuchsia-400">
+        <Mic className="h-3 w-3" /> {caps.mics.length} mic{caps.mics.length === 1 ? '' : 's'}
+      </Badge>
+      {caps.shells.length > 0 ? (
+        <Badge variant="outline" className="gap-1 border-border/60 bg-background/40">
+          <SquareTerminal className="h-3 w-3" /> {caps.shells.join(' · ')}
+        </Badge>
+      ) : null}
+      {(caps.notes ?? []).map((n) => (
+        <span key={n} className="text-[11px] text-muted-foreground/80" title="agent-reported limitation">
+          {n}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// ───────────────────── mic level meter (no image) ───────────────────
+
+/**
+ * Animated input-level meter driven by `stream:frame` level (0..1, ~8 Hz).
+ * The fill eases via CSS transition; a peak-hold marker decays slowly so
+ * transient spikes stay readable.
+ */
+function MicLevelMeter({ level }: { level: number }) {
+  const peakRef = useRef(0)
+  const [peak, setPeak] = useState(0)
+
+  useEffect(() => {
+    // rise instantly, decay ~0.02 per frame (~8 Hz updates)
+    const next = Math.max(level, peakRef.current - 0.02)
+    peakRef.current = next
+    setPeak(next)
+  }, [level])
+
+  const pct = Math.min(100, Math.max(0, Math.round(level * 100)))
+  const peakPct = Math.min(99, Math.max(1, Math.round(peak * 100)))
+
+  return (
+    <div className="flex flex-col items-center justify-center gap-5 px-6 py-12">
+      <div className="glass-inset flex h-14 w-14 items-center justify-center rounded-2xl">
+        <Mic
+          className={cn(
+            'h-6 w-6 transition-colors duration-200',
+            pct > 4 ? 'text-rose-500' : 'text-muted-foreground',
+          )}
+          aria-hidden
+        />
+      </div>
+      <div
+        role="meter"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+        aria-label="Microphone input level"
+        className="glass-inset relative h-3.5 w-full max-w-sm overflow-hidden rounded-full"
+      >
+        <div
+          className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-rose-400 transition-[width] duration-150 ease-out"
+          style={{ width: `${Math.max(2, pct)}%` }}
+        />
+        {/* peak-hold marker */}
+        <span
+          aria-hidden
+          className="absolute top-0 h-full w-0.5 rounded-full bg-foreground/60 transition-[left] duration-150 ease-out"
+          style={{ left: `calc(${peakPct}% - 1px)` }}
+        />
+      </div>
+      <p className="font-mono text-xs tabular-nums text-muted-foreground">
+        {pct}% input level · live
+      </p>
+    </div>
+  )
+}
+
+// ─────────────────────── live stream panel ──────────────────────────
+
+function StreamPanel({
+  stream,
+  now,
+  onStop,
+  stopping,
+}: {
+  stream: ActiveStream
+  now: number
+  onStop: (streamId: string) => void
+  stopping: boolean
+}) {
+  const frame = useDash((s) => s.streamFrames[stream.streamId])
+  const { data: devices } = useDevices()
+  const hostname =
+    devices?.find((d) => d.id === stream.deviceId)?.hostname ?? stream.agentId
+
+  // measured fps — trailing 5s window of frame arrivals, 1s ticker
+  const timesRef = useRef<number[]>([])
+  const [measuredFps, setMeasuredFps] = useState(0)
+  const seq = frame?.seq ?? 0
+
+  useEffect(() => {
+    if (seq === 0) return
+    const t = Date.now()
+    timesRef.current = [...timesRef.current, t].filter((x) => t - x <= 5000)
+  }, [seq, frame?.at])
+
+  useEffect(() => {
+    const iv = setInterval(() => {
+      const t = Date.now()
+      timesRef.current = timesRef.current.filter((x) => t - x <= 5000)
+      setMeasuredFps(Math.round((timesRef.current.length / 5) * 10) / 10)
+    }, 1000)
+    return () => clearInterval(iv)
+  }, [])
+
+  const meta = STREAM_KIND_META[stream.kind]
+  const Icon = meta.icon
+  const hasImage = stream.kind !== 'mic'
+
+  // stall watchdog — if no frame has arrived for 12s (e.g. the agent or hub
+  // restarted while this panel was open) the panel must not keep claiming
+  // LIVE. Derived from the 1s `now` ticker, so no extra timers/state.
+  const lastFrameAt = frame?.at ?? stream.startedAt
+  const stalled = now - lastFrameAt > 12000
+
+  return (
+    <motion.div
+      layout
+      variants={{
+        hidden: { opacity: 0, y: 14, scale: 0.98 },
+        show: {
+          opacity: 1,
+          y: 0,
+          scale: 1,
+          transition: { duration: 0.28, ease: 'easeOut' },
+        },
+      }}
+      exit={{ opacity: 0, scale: 0.96, transition: { duration: 0.18 } }}
+      className="glass glass-hover lift flex flex-col overflow-hidden rounded-2xl"
+    >
+      {/* header */}
+      <div className="flex items-center gap-2.5 px-3.5 pb-2 pt-3">
+        {stalled ? (
+          <span className="relative flex h-2.5 w-2.5 shrink-0" aria-hidden>
+            <span className="inline-flex h-2.5 w-2.5 rounded-full bg-amber-500" />
+          </span>
+        ) : (
+          <span className="relative flex h-2.5 w-2.5 shrink-0" aria-hidden>
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-70" />
+            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-rose-500" />
+          </span>
+        )}
+        <div className="glass-inset flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-primary">
+          <Icon className="h-3.5 w-3.5" aria-hidden />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-semibold leading-tight">{stream.sourceName}</p>
+          <p className="truncate text-[11px] text-muted-foreground">
+            {meta.label} · {hostname}
+          </p>
+        </div>
+        {stalled ? (
+          <Badge
+            variant="outline"
+            title="No frames for 12s — the stream may have ended when the agent or hub reconnected. Stop clears the panel."
+            className="shrink-0 animate-pulse border-amber-500/40 bg-amber-500/10 text-[10px] font-bold tracking-wider text-amber-600 dark:text-amber-400"
+          >
+            NO SIGNAL
+          </Badge>
+        ) : (
+          <Badge
+            variant="outline"
+            className="shrink-0 border-rose-500/40 bg-rose-500/10 text-[10px] font-bold tracking-wider text-rose-600 dark:text-rose-400"
+          >
+            LIVE
+          </Badge>
+        )}
+      </div>
+
+      {/* body */}
+      {hasImage ? (
+        frame?.dataUri ? (
+          <img
+            src={frame.dataUri}
+            alt={`Live ${stream.kind} stream from ${stream.sourceName}`}
+            className={cn(
+              'max-h-56 w-full bg-black/50 object-contain transition-opacity duration-500 sm:max-h-64',
+              stalled && 'opacity-50 grayscale',
+            )}
+            decoding="async"
+          />
+        ) : (
+          <div className="flex h-40 w-full flex-col items-center justify-center gap-2 bg-black/30">
+            <Loader2
+              className={cn(
+                'h-5 w-5 animate-spin text-emerald-400',
+                stalled && 'opacity-40',
+              )}
+              aria-hidden
+            />
+            <p className="text-xs text-zinc-400">
+              {stalled ? 'no frames arriving — agent may have reconnected' : 'waiting for first frame…'}
+            </p>
+          </div>
+        )
+      ) : (
+        <MicLevelMeter level={stalled ? 0 : (frame?.level ?? 0)} />
+      )}
+
+      {/* footer */}
+      <div className="flex flex-wrap items-center gap-1.5 px-3.5 py-2.5 text-[11px] text-muted-foreground">
+        <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+          {measuredFps > 0 ? `${measuredFps.toFixed(1)} fps` : `${stream.fps || '—'} fps target`}
+        </Badge>
+        <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+          #{seq}
+        </Badge>
+        <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+          {fmtElapsed(now - stream.startedAt)}
+        </Badge>
+        {hasImage && stream.quality ? (
+          <Badge variant="secondary" className="font-mono text-[10px]">
+            {stream.quality}
+          </Badge>
+        ) : null}
+        <Button
+          size="sm"
+          variant="outline"
+          className="ml-auto h-8 shrink-0 border-rose-500/40 text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 dark:hover:text-rose-300"
+          disabled={stopping}
+          onClick={() => onStop(stream.streamId)}
+        >
+          {stopping ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+          ) : (
+            <Square className="h-3.5 w-3.5" aria-hidden />
+          )}
+          Stop
+        </Button>
+      </div>
+    </motion.div>
+  )
+}
+
+// ───────────────────── per-source launcher row ──────────────────────
+
+interface SourceConfig {
+  fps: number
+  quality: Quality
+}
+
+function LauncherRow({
+  kind,
+  sourceId,
+  name,
+  meta,
+  cfg,
+  onCfg,
+  active,
+  busy,
+  disabled,
+  onStart,
+  onStop,
+}: {
+  kind: StreamKind
+  sourceId: string | null
+  name: string
+  meta: string | null
+  cfg: SourceConfig
+  onCfg: (sourceId: string, kind: StreamKind, patch: Partial<SourceConfig>) => void
+  active: boolean
+  busy: boolean
+  disabled: boolean
+  onStart: () => void
+  onStop: () => void
+}) {
+  const key = sourceId ?? '__default__'
+  return (
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl px-3 py-2.5 transition-colors',
+        active ? 'bg-rose-500/5 ring-1 ring-rose-500/20' : 'hover:bg-primary/5',
+      )}
+    >
+      <div className="min-w-0 flex-1 basis-40">
+        <p className="flex items-center gap-1.5 truncate text-sm font-medium">
+          {active ? (
+            <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-70" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-rose-500" />
+            </span>
+          ) : null}
+          {name}
+        </p>
+        {meta ? <p className="truncate text-[11px] text-muted-foreground">{meta}</p> : null}
+      </div>
+
+      {kind !== 'mic' ? (
+        <>
+          <div className="flex items-center gap-1.5">
+            <Label className="sr-only" htmlFor={`fps-${key}`}>
+              Frames per second for {name}
+            </Label>
+            <Select
+              value={String(cfg.fps)}
+              onValueChange={(v) => onCfg(key, kind, { fps: Number(v) })}
+              disabled={disabled || active}
+            >
+              <SelectTrigger
+                id={`fps-${key}`}
+                className="h-8 w-[74px] text-xs"
+                aria-label={`FPS for ${name}`}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="glass-overlay">
+                {(kind === 'screen' ? SCREEN_FPS : CAMERA_FPS).map((f) => (
+                  <SelectItem key={f} value={String(f)} className="text-xs">
+                    {f} fps
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Label className="sr-only" htmlFor={`q-${key}`}>
+              Quality for {name}
+            </Label>
+            <Select
+              value={cfg.quality}
+              onValueChange={(v) => onCfg(key, kind, { quality: v as Quality })}
+              disabled={disabled || active}
+            >
+              <SelectTrigger
+                id={`q-${key}`}
+                className="h-8 w-[92px] text-xs"
+                aria-label={`Quality for ${name}`}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="glass-overlay">
+                {QUALITIES.map((q) => (
+                  <SelectItem key={q} value={q} className="text-xs">
+                    {q === 'source' ? 'source' : q}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </>
+      ) : null}
+
+      {active ? (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 shrink-0 border-rose-500/40 text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 dark:hover:text-rose-300"
+          onClick={onStop}
+        >
+          <Square className="h-3.5 w-3.5" aria-hidden />
+          Stop
+        </Button>
+      ) : (
+        <Button size="sm" variant="outline" className="h-8 shrink-0 border-primary/40" disabled={disabled || busy} onClick={onStart}>
+          {busy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+          ) : (
+            <Play className="h-3.5 w-3.5" aria-hidden />
+          )}
+          Start
+        </Button>
+      )}
+    </div>
+  )
 }
 
 // ───────────────────────── live view dialog ─────────────────────────
@@ -271,12 +700,15 @@ function LiveViewDialog({
   )
 }
 
-// ─────────────────────────── view ───────────────────────────────────
+// ──────────────────────────── view ──────────────────────────────────
 
 export default function MediaView() {
   const qc = useQueryClient()
   const selectedDeviceId = useDash((s) => s.selectedDeviceId)
   const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
+  const activeStreams = useDash((s) => s.activeStreams)
+  const addStream = useDash((s) => s.addStream)
+  const removeStream = useDash((s) => s.removeStream)
   const { data: devices } = useDevices()
 
   const device = useMemo(
@@ -299,10 +731,15 @@ export default function MediaView() {
   const [liveOpen, setLiveOpen] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
+  // per-source launcher config (fps + quality), keyed by sourceId
+  const [srcCfg, setSrcCfg] = useState<Record<string, SourceConfig>>({})
+  const [startingKey, setStartingKey] = useState<string | null>(null)
+  const [stoppingId, setStoppingId] = useState<string | null>(null)
+
   const effectiveQuality = quality ?? settings?.defaultStreamQuality ?? '720p'
   const hasPassword = Boolean(settings?.capturePassword)
 
-  // 1s ticker for "elapsed" on active captures
+  // 1s ticker for "elapsed" on active captures + stream panels
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(t)
@@ -317,6 +754,157 @@ export default function MediaView() {
   })
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['media'] })
+
+  // ── multi-source stream control ─────────────────────────────────
+
+  const startStream = useMutation({
+    mutationFn: (v: {
+      kind: StreamKind
+      sourceId: string | null
+      sourceName: string
+      fps?: number
+      quality?: string
+    }) =>
+      api<{ streamId: string }>('/api/streams/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          deviceId: selectedDeviceId,
+          kind: v.kind,
+          sourceId: v.sourceId,
+          fps: v.fps,
+          quality: v.quality,
+        }),
+      }),
+    onSuccess: (data, v) => {
+      if (!data?.streamId) throw new Error('agent did not return a streamId')
+      addStream({
+        streamId: data.streamId,
+        kind: v.kind,
+        deviceId: selectedDeviceId ?? '',
+        agentId: device?.agentId ?? '',
+        sourceId: v.sourceId,
+        sourceName: v.sourceName,
+        fps: v.fps ?? 0,
+        quality: v.quality ?? 'source',
+        startedAt: Date.now(),
+      })
+      toast.success(`${STREAM_KIND_META[v.kind].label} stream started`, {
+        description: `${v.sourceName} • ${v.fps ? `${v.fps} fps` : 'levels only'}${
+          v.quality ? ` • ${v.quality}` : ''
+        }`,
+      })
+    },
+    onError: (e) =>
+      toast.error('Stream failed to start', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+    onSettled: () => setStartingKey(null),
+  })
+
+  const stopStream = useMutation({
+    mutationFn: (streamId: string) =>
+      api<{ ok: true }>('/api/streams/stop', {
+        method: 'POST',
+        body: JSON.stringify({ streamId }),
+      }),
+    onSuccess: (_d, streamId) => {
+      // keep the panel until the socket confirms — the button shows a spinner
+      toast.success('Stop signal sent — stream is wrapping up')
+    },
+    onError: (e) =>
+      toast.error('Failed to stop stream', {
+        description:
+          (e instanceof Error ? e.message : 'Unknown error') +
+          ' — the panel is retired locally if the agent no longer knows the stream.',
+      }),
+    // Belt-and-braces (success AND error paths): the hub normally broadcasts
+    // `stream:ended` after the agent acks, but some dispatch paths skip the
+    // broadcast — and a stop against a stream the agent already lost (agent
+    // restart, hub restart) errors out without any `stream:ended`. If the
+    // panel is still registered after a short grace period, retire it locally
+    // so the UI never hangs. (removeStream is idempotent.)
+    onSettled: (_d, _e, streamId) => {
+      setStoppingId(null)
+      window.setTimeout(() => {
+        if (useDash.getState().activeStreams[streamId]) {
+          removeStream(streamId)
+          toast.info('Stream ended')
+        }
+      }, 3000)
+    },
+  })
+
+  const stopAllStreams = useMutation({
+    mutationFn: async (ids: string[]) => {
+      await Promise.allSettled(
+        ids.map((streamId) =>
+          api<{ ok: true }>('/api/streams/stop', {
+            method: 'POST',
+            body: JSON.stringify({ streamId }),
+          }),
+        ),
+      )
+    },
+    onSuccess: (_d, ids) => {
+      toast.success('Stop signal sent to all streams')
+    },
+    onError: (e) =>
+      toast.error('Failed to stop streams', {
+        description: e instanceof Error ? e.message : 'Unknown error',
+      }),
+    // Same belt-and-braces as stopStream (both paths) — retire panels the
+    // socket never confirmed ended (idempotent when `stream:ended` arrived).
+    onSettled: (_d, _e, ids) => {
+      for (const streamId of ids) {
+        window.setTimeout(() => {
+          if (useDash.getState().activeStreams[streamId]) {
+            removeStream(streamId)
+          }
+        }, 3000)
+      }
+    },
+  })
+
+  const caps = device?.captures ?? null
+  const hasCaps =
+    !!caps && (caps.monitors.length > 0 || caps.cameras.length > 0 || caps.mics.length > 0)
+  const runningList = Object.values(activeStreams)
+
+  const cfgFor = (sourceId: string | null, k: StreamKind): SourceConfig => {
+    const key = sourceId ?? '__default__'
+    const existing = srcCfg[key]
+    if (existing) return existing
+    return {
+      fps: k === 'screen' ? 2 : 10,
+      quality: (settings?.defaultStreamQuality ?? '720p') as Quality,
+    }
+  }
+
+  const patchCfg = (sourceId: string, k: StreamKind, patch: Partial<SourceConfig>) =>
+    setSrcCfg((prev) => ({
+      ...prev,
+      [sourceId]: { ...cfgFor(sourceId, k), ...patch },
+    }))
+
+  const activeFor = (k: StreamKind, sourceId: string | null) =>
+    runningList.find(
+      (s) => s.deviceId === selectedDeviceId && s.kind === k && (s.sourceId ?? null) === sourceId,
+    )
+
+  const launch = (k: StreamKind, sourceId: string | null, sourceName: string) => {
+    if (!selectedDeviceId || device?.status !== 'online') return
+    const cfg = cfgFor(sourceId, k)
+    setStartingKey(`${k}:${sourceId ?? 'default'}`)
+    startStream.mutate({
+      kind: k,
+      sourceId,
+      sourceName,
+      fps: k === 'mic' ? undefined : cfg.fps,
+      quality: k === 'mic' ? undefined : cfg.quality,
+    })
+  }
+
+  // ── legacy capture console (v0.2 features, preserved) ───────────
 
   const screenshot = useMutation({
     mutationFn: () =>
@@ -417,14 +1005,14 @@ export default function MediaView() {
     return (
       <div className="flex flex-col gap-4">
         <SectionHeader
-          title="Media capture"
-          subtitle="Screenshots, screen recording, microphone & camera — encrypted, in-memory"
+          title="Streams"
+          subtitle="Multi-source live capture — screen, cameras & microphones simultaneously"
           icon={<Clapperboard className="h-5 w-5" />}
         />
         <EmptyState
           icon={<Clapperboard className="h-10 w-10" />}
           title="No device selected"
-          hint="Pick a device below to open the capture studio."
+          hint="Pick a device below to open the stream launcher."
         />
         <div className="mx-auto w-full max-w-sm">
           <DeviceSelector value={selectedDeviceId} onChange={setSelectedDeviceId} />
@@ -436,9 +1024,204 @@ export default function MediaView() {
   return (
     <div className="flex flex-col gap-4">
       <SectionHeader
-        title="Media capture"
-        subtitle="Screenshots, screen recording, microphone & camera — encrypted, in-memory"
+        title="Streams"
+        subtitle="Multi-source live capture — screen, cameras & microphones simultaneously"
         icon={<Clapperboard className="h-5 w-5" />}
+        actions={
+          runningList.length > 0 ? (
+            <>
+              <Badge
+                variant="outline"
+                className="gap-1.5 border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400"
+              >
+                <span className="relative flex h-2 w-2" aria-hidden>
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-70" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-rose-500" />
+                </span>
+                {runningList.length} stream{runningList.length === 1 ? '' : 's'} active
+              </Badge>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-9 border-rose-500/40 text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 dark:hover:text-rose-300"
+                disabled={stopAllStreams.isPending}
+                onClick={() => stopAllStreams.mutate(runningList.map((s) => s.streamId))}
+              >
+                <Square className="h-3.5 w-3.5" /> Stop all
+              </Button>
+            </>
+          ) : null
+        }
+      />
+
+      {/* device + capture summary */}
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <DeviceSelector value={selectedDeviceId} onChange={setSelectedDeviceId} />
+          <CaptureStrip device={device} />
+        </div>
+        {device && device.status !== 'online' ? (
+          <p className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400">
+            <Info className="h-3.5 w-3.5" aria-hidden />
+            Device is offline — streams can only start while the agent is connected.
+          </p>
+        ) : null}
+      </div>
+
+      {/* transparency strip */}
+      <div className="glass-inset flex items-center gap-3 rounded-2xl px-4 py-3">
+        <Eye className="h-4 w-4 shrink-0 text-primary" aria-hidden />
+        <p className="text-sm text-muted-foreground">
+          Live capture is announced on the device — the user always sees SentraRMM indicators.
+        </p>
+      </div>
+
+      {/* stream launcher */}
+      {hasCaps && caps ? (
+        <Panel className="card-sheen glass-hover p-5 sm:p-6">
+          <div className="flex flex-col gap-4">
+            <div>
+              <h3 className="font-semibold">Stream launcher</h3>
+              <p className="text-sm text-muted-foreground">
+                Start any combination — multiple sources and kinds run at the same time.
+              </p>
+            </div>
+
+            <div className="grid gap-3 lg:grid-cols-3">
+              {/* Screen */}
+              <div className="glass-inset flex flex-col gap-1 rounded-xl p-2.5">
+                <p className="flex items-center gap-2 px-1 pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  <Monitor className="h-3.5 w-3.5" aria-hidden /> Screen
+                </p>
+                {caps.monitors.length === 0 ? (
+                  <p className="px-2 py-3 text-xs text-muted-foreground">no monitors reported</p>
+                ) : (
+                  caps.monitors.map((m) => {
+                    const active = activeFor('screen', m.id)
+                    return (
+                      <LauncherRow
+                        key={m.id}
+                        kind="screen"
+                        sourceId={m.id}
+                        name={m.name}
+                        meta={`${m.width}×${m.height}${m.primary ? ' · primary' : ''}`}
+                        cfg={cfgFor(m.id, 'screen')}
+                        onCfg={patchCfg}
+                        active={!!active}
+                        busy={startingKey === `screen:${m.id}`}
+                        disabled={device?.status !== 'online'}
+                        onStart={() => launch('screen', m.id, m.name)}
+                        onStop={() => active && stopStream.mutate(active.streamId)}
+                      />
+                    )
+                  })
+                )}
+              </div>
+
+              {/* Cameras */}
+              <div className="glass-inset flex flex-col gap-1 rounded-xl p-2.5">
+                <p className="flex items-center gap-2 px-1 pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  <Camera className="h-3.5 w-3.5" aria-hidden /> Cameras
+                </p>
+                {caps.cameras.length === 0 ? (
+                  <p className="px-2 py-3 text-xs text-muted-foreground">no cameras reported</p>
+                ) : (
+                  caps.cameras.map((c) => {
+                    const active = activeFor('camera', c.id)
+                    return (
+                      <LauncherRow
+                        key={c.id}
+                        kind="camera"
+                        sourceId={c.id}
+                        name={c.name}
+                        meta={null}
+                        cfg={cfgFor(c.id, 'camera')}
+                        onCfg={patchCfg}
+                        active={!!active}
+                        busy={startingKey === `camera:${c.id}`}
+                        disabled={device?.status !== 'online'}
+                        onStart={() => launch('camera', c.id, c.name)}
+                        onStop={() => active && stopStream.mutate(active.streamId)}
+                      />
+                    )
+                  })
+                )}
+              </div>
+
+              {/* Microphones */}
+              <div className="glass-inset flex flex-col gap-1 rounded-xl p-2.5">
+                <p className="flex items-center gap-2 px-1 pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  <Mic className="h-3.5 w-3.5" aria-hidden /> Microphones
+                </p>
+                {caps.mics.length === 0 ? (
+                  <p className="px-2 py-3 text-xs text-muted-foreground">no microphones reported</p>
+                ) : (
+                  caps.mics.map((mc) => {
+                    const active = activeFor('mic', mc.id)
+                    return (
+                      <LauncherRow
+                        key={mc.id}
+                        kind="mic"
+                        sourceId={mc.id}
+                        name={mc.name}
+                        meta="input level stream"
+                        cfg={cfgFor(mc.id, 'mic')}
+                        onCfg={patchCfg}
+                        active={!!active}
+                        busy={startingKey === `mic:${mc.id}`}
+                        disabled={device?.status !== 'online'}
+                        onStart={() => launch('mic', mc.id, mc.name)}
+                        onStop={() => active && stopStream.mutate(active.streamId)}
+                      />
+                    )
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        </Panel>
+      ) : null}
+
+      {/* active stream grid */}
+      <AnimatePresence initial={false}>
+        {runningList.length > 0 ? (
+          <motion.div
+            key="stream-grid"
+            variants={{ hidden: {}, show: { transition: { staggerChildren: 0.07 } } }}
+            initial="hidden"
+            animate="show"
+            exit={{ opacity: 0, transition: { duration: 0.15 } }}
+            className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
+          >
+            {runningList.map((s) => (
+              <StreamPanel
+                key={s.streamId}
+                stream={s}
+                now={now}
+                stopping={stoppingId === s.streamId}
+                onStop={(id) => {
+                  setStoppingId(id)
+                  stopStream.mutate(id)
+                }}
+              />
+            ))}
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
+      {/* ───────────────────── Captures (legacy features) ───────────────────── */}
+      <div className="mt-2 flex items-center gap-3" role="separator">
+        <span className="h-px flex-1 bg-border/60" aria-hidden />
+        <span className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+          Captures
+        </span>
+        <span className="h-px flex-1 bg-border/60" aria-hidden />
+      </div>
+
+      <SectionHeader
+        title="Capture console"
+        subtitle="Single-shot screenshots, queued recordings & the encrypted vault gallery"
+        icon={<Camera className="h-5 w-5" />}
       />
 
       {/* encryption banner */}
@@ -469,7 +1252,7 @@ export default function MediaView() {
         <Panel className="card-sheen glass-hover p-6">
           <div className="flex flex-col gap-5">
             <div>
-              <h3 className="font-semibold">Capture console</h3>
+              <h3 className="font-semibold">Single-shot & queued capture</h3>
               <p className="text-sm text-muted-foreground">
                 Target: <span className="font-medium text-foreground">{device?.hostname}</span>
                 {device?.friendlyName ? (
@@ -657,7 +1440,6 @@ export default function MediaView() {
                 const meta = KIND_META[a.kind] ?? KIND_META.screenshot
                 const sb = statusBadge(a.status)
                 const Icon = meta.icon
-                const isRecord = a.kind !== 'screenshot'
                 return (
                   <div key={a.id} className="glass-inset glass-hover flex flex-col gap-3 rounded-2xl p-3">
                     <div className="flex items-start justify-between gap-2">

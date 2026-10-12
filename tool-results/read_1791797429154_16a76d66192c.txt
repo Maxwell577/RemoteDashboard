@@ -1,0 +1,1028 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useState } from 'react'
+     4→import { useMutation, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import {
+     7→  CheckCircle2,
+     8→  Copy,
+     9→  Disc3,
+    10→  Download,
+    11→  Eye,
+    12→  EyeOff,
+    13→  Info,
+    14→  KeyRound,
+    15→  Loader2,
+    16→  Lock,
+    17→  Monitor,
+    18→  Camera,
+    19→  Mic,
+    20→  Radar,
+    21→  ShieldCheck,
+    22→  Square,
+    23→  Trash2,
+    24→  Wand2,
+    25→  type LucideIcon,
+    26→} from 'lucide-react'
+    27→import {
+    28→  api,
+    29→  type Device,
+    30→  type RecordingArtifact,
+    31→  type RecordingState,
+    32→} from '@/lib/types'
+    33→import { useDash } from '@/lib/store'
+    34→import { cn } from '@/lib/utils'
+    35→import { useRecordings } from '@/hooks/use-recordings'
+    36→import {
+    37→  DeviceSelector,
+    38→  EmptyState,
+    39→  ErrorBlock,
+    40→  LoadingBlock,
+    41→  Panel,
+    42→  SectionHeader,
+    43→  fmtBytes,
+    44→  fmtDate,
+    45→  timeAgo,
+    46→  useDevices,
+    47→} from '../shared'
+    48→import { Badge } from '@/components/ui/badge'
+    49→import { Button } from '@/components/ui/button'
+    50→import { Input } from '@/components/ui/input'
+    51→import { Label } from '@/components/ui/label'
+    52→import {
+    53→  Popover,
+    54→  PopoverContent,
+    55→  PopoverTrigger,
+    56→} from '@/components/ui/popover'
+    57→import {
+    58→  AlertDialog,
+    59→  AlertDialogAction,
+    60→  AlertDialogCancel,
+    61→  AlertDialogContent,
+    62→  AlertDialogDescription,
+    63→  AlertDialogFooter,
+    64→  AlertDialogHeader,
+    65→  AlertDialogTitle,
+    66→  AlertDialogTrigger,
+    67→} from '@/components/ui/alert-dialog'
+    68→
+    69→// ─────────────────────────── constants ──────────────────────────────
+    70→
+    71→const DURATION_CHIPS = [5, 15, 50, 120]
+    72→
+    73→const DECRYPT_CMD =
+    74→  'python agent-python/tools/decrypt_recording.py <file>.enc --passphrase "<passphrase>" --out frames/'
+    75→
+    76→// short memorable word list for the strong-passphrase generator
+    77→const WORDS = [
+    78→  'harbor', 'quartz', 'lumen', 'cactus', 'vector', 'nimbus', 'ember', 'onyx',
+    79→  'ridge', 'falcon', 'cedar', 'cobalt', 'delta', 'orbit', 'pixel', 'summit',
+    80→  'thistle', 'vertex', 'willow', 'zenith', 'anchor', 'basil', 'comet', 'dynamo',
+    81→  'echo', 'fjord', 'glacier', 'helix', 'ivory', 'jade', 'krypton', 'lotus',
+    82→  'mango', 'nebula', 'opal', 'prism', 'quiver', 'raven', 'sable', 'topaz',
+    83→  'umber', 'violet', 'wombat', 'xenon', 'yonder', 'zephyr', 'maple', 'juno',
+    84→]
+    85→
+    86→// ─────────────────────────── helpers ────────────────────────────────
+    87→
+    88→/** sha256 hex prefix (12 chars) of the passphrase — matches the agent's keyFingerprint. */
+    89→async function sha256HexPrefix(input: string): Promise<string | null> {
+    90→  try {
+    91→    if (typeof crypto === 'undefined' || !crypto.subtle) return null
+    92→    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
+    93→    return Array.from(new Uint8Array(buf))
+    94→      .map((b) => b.toString(16).padStart(2, '0'))
+    95→      .join('')
+    96→      .slice(0, 12)
+    97→  } catch {
+    98→    return null
+    99→  }
+   100→}
+   101→
+   102→function generateStrongPassphrase(): string {
+   103→  const pick = <T,>(arr: T[]): T => {
+   104→    const buf = new Uint32Array(1)
+   105→    crypto.getRandomValues(buf)
+   106→    return arr[buf[0] % arr.length]
+   107→  }
+   108→  const words = [pick(WORDS), pick(WORDS), pick(WORDS), pick(WORDS)]
+   109→  const digits = String(crypto.getRandomValues(new Uint16Array(1))[0] % 1000).padStart(3, '0')
+   110→  return `${words.join('-')}-${digits}`
+   111→}
+   112→
+   113→const STATE_META: Record<
+   114→  RecordingState,
+   115→  { label: string; className: string; pulse: boolean }
+   116→> = {
+   117→  armed: {
+   118→    label: 'armed',
+   119→    className: 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+   120→    pulse: true,
+   121→  },
+   122→  recording: {
+   123→    label: 'recording',
+   124→    className: 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400',
+   125→    pulse: true,
+   126→  },
+   127→  completed: {
+   128→    label: 'completed',
+   129→    className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+   130→    pulse: false,
+   131→  },
+   132→  failed: {
+   133→    label: 'failed',
+   134→    className: 'border-zinc-500/30 bg-zinc-500/10 text-zinc-600 dark:text-zinc-400',
+   135→    pulse: false,
+   136→  },
+   137→  canceled: {
+   138→    label: 'canceled',
+   139→    className: 'border-zinc-500/30 bg-zinc-500/10 text-zinc-600 dark:text-zinc-400',
+   140→    pulse: false,
+   141→  },
+   142→}
+   143→
+   144→function fmtElapsedSec(sec: number): string {
+   145→  const s = Math.max(0, Math.floor(sec))
+   146→  const m = Math.floor(s / 60)
+   147→  const r = s % 60
+   148→  return `${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`
+   149→}
+   150→
+   151→// ─────────────────────── decrypt help popover ───────────────────────
+   152→
+   153→function DecryptHelpPopover() {
+   154→  const [copied, setCopied] = useState(false)
+   155→  const copy = async () => {
+   156→    try {
+   157→      await navigator.clipboard.writeText(DECRYPT_CMD)
+   158→      setCopied(true)
+   159→      toast.success('Decrypt command copied')
+   160→      setTimeout(() => setCopied(false), 1500)
+   161→    } catch {
+   162→      toast.error('Clipboard unavailable — select the text manually')
+   163→    }
+   164→  }
+   165→  return (
+   166→    <Popover>
+   167→      <PopoverTrigger asChild>
+   168→        <Button size="sm" variant="ghost" className="glass-inset h-9 gap-2">
+   169→          <KeyRound className="h-4 w-4" aria-hidden />
+   170→          Decrypt help
+   171→        </Button>
+   172→      </PopoverTrigger>
+   173→      <PopoverContent className="glass-overlay w-[26rem] max-w-[calc(100vw-2rem)]" align="end">
+   174→        <div className="flex flex-col gap-3">
+   175→          <div>
+   176→            <p className="text-sm font-semibold">Decrypting .enc recordings</p>
+   177→            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+   178→              Recordings upload as <span className="font-mono">{'<recordingId>'}.enc</span> — line 1 is a
+   179→              JSON header (<span className="font-mono">SENTRA-REC-1</span>, AES-256-GCM, PBKDF2-HMAC-SHA256,
+   180→              200 000 iterations, salt), followed by framed records
+   181→              (<span className="font-mono">[u32 len][12B nonce][ciphertext][16B tag]</span>). The key is
+   182→              derived only from your passphrase — it is never stored.
+   183→            </p>
+   184→          </div>
+   185→          <div className="glass-inset relative rounded-lg">
+   186→            <div className="flex items-center justify-between gap-2 border-b border-border/40 px-2.5 py-1.5">
+   187→              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+   188→                shell — where the repo is checked out
+   189→              </span>
+   190→              <Button size="sm" variant="ghost" className="h-7 gap-1 px-2" onClick={() => void copy()}>
+   191→                {copied ? (
+   192→                  <CheckCircle2 className="h-3 w-3 text-emerald-500" aria-hidden />
+   193→                ) : (
+   194→                  <Copy className="h-3 w-3" aria-hidden />
+   195→                )}
+   196→                Copy
+   197→              </Button>
+   198→            </div>
+   199→            <pre className="scroll-slim overflow-x-auto px-2.5 py-2 font-mono text-[11px] leading-relaxed text-emerald-700 dark:text-emerald-300">
+   200→              {DECRYPT_CMD}
+   201→            </pre>
+   202→          </div>
+   203→          <p className="text-xs leading-relaxed text-muted-foreground">
+   204→            <span className="font-medium text-foreground">Key check:</span> each row shows
+   205→            <span className="mx-1 font-mono">sha256(passphrase)[0:12]</span>
+   206→            as its fingerprint — if it matches the preview you saw when scheduling, that passphrase
+   207→            decrypts the file.
+   208→          </p>
+   209→        </div>
+   210→      </PopoverContent>
+   211→    </Popover>
+   212→  )
+   213→}
+   214→
+   215→// ─────────────────────── scheduler panel ────────────────────────────
+   216→
+   217→interface SelectedSources {
+   218→  monitors: string[]
+   219→  cameras: string[]
+   220→  mics: string[]
+   221→}
+   222→
+   223→function SourceChip({
+   224→  icon: Icon,
+   225→  label,
+   226→  selected,
+   227→  disabled,
+   228→  onToggle,
+   229→}: {
+   230→  icon: LucideIcon
+   231→  label: string
+   232→  selected: boolean
+   233→  disabled?: boolean
+   234→  onToggle: () => void
+   235→}) {
+   236→  return (
+   237→    <button
+   238→      type="button"
+   239→      role="checkbox"
+   240→      aria-checked={selected}
+   241→      disabled={disabled}
+   242→      onClick={onToggle}
+   243→      className={cn(
+   244→        'inline-flex min-h-11 items-center gap-1.5 rounded-full px-3 text-xs font-medium outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring/60 disabled:cursor-not-allowed disabled:opacity-50',
+   245→        selected
+   246→          ? 'border border-primary/40 bg-primary/15 text-primary shadow-[inset_0_0_0_1px] shadow-primary/20'
+   247→          : 'glass-inset text-muted-foreground hover:bg-primary/10 hover:text-foreground',
+   248→      )}
+   249→    >
+   250→      <Icon className="h-3.5 w-3.5" aria-hidden />
+   251→      {label}
+   252→      {selected ? <CheckCircle2 className="h-3 w-3" aria-hidden /> : null}
+   253→    </button>
+   254→  )
+   255→}
+   256→
+   257→function Scheduler({
+   258→  device,
+   259→  onScheduled,
+   260→}: {
+   261→  device: Device | null
+   262→  onScheduled: (r: RecordingArtifact) => void
+   263→}) {
+   264→  // derived selection: follows the store's last-selected device until the
+   265→  // user explicitly overrides it in this panel (no sync setState-in-effect)
+   266→  const [overrideId, setOverrideId] = useState<string | null>(null)
+   267→  const devId = overrideId ?? device?.id ?? null
+   268→  const [label, setLabel] = useState('')
+   269→  const [minutes, setMinutes] = useState('15')
+   270→  const [sources, setSources] = useState<SelectedSources>({ monitors: [], cameras: [], mics: [] })
+   271→  const [passphrase, setPassphrase] = useState('')
+   272→  const [confirmPass, setConfirmPass] = useState('')
+   273→  const [showPass, setShowPass] = useState(false)
+   274→  const [showConfirm, setShowConfirm] = useState(false)
+   275→  const [fingerprint, setFingerprint] = useState<string | null>(null)
+   276→
+   277→  const caps = device?.captures ?? null
+   278→  const hasCaps =
+   279→    !!caps && (caps.monitors.length > 0 || caps.cameras.length > 0 || caps.mics.length > 0)
+   280→
+   281→  // live sha256(passphrase)[0:12] preview so the key can be verified later
+   282→  // (async — Web Crypto; render guards on passphrase so a cleared field never
+   283→  // shows a stale fingerprint)
+   284→  useEffect(() => {
+   285→    if (!passphrase) return
+   286→    let alive = true
+   287→    void sha256HexPrefix(passphrase).then((fp) => {
+   288→      if (alive) setFingerprint(fp)
+   289→    })
+   290→    return () => {
+   291→      alive = false
+   292→    }
+   293→  }, [passphrase])
+   294→
+   295→  const durationSec = Math.max(1, Math.floor(Number(minutes) || 0)) * 60
+   296→  const passOk = passphrase.length >= 8
+   297→  const confirmOk = passphrase.length > 0 && passphrase === confirmPass
+   298→  const sourceCount = sources.monitors.length + sources.cameras.length + sources.mics.length
+   299→  const valid = !!devId && durationSec >= 60 && sourceCount > 0 && passOk && confirmOk
+   300→
+   301→  const toggle = (kind: keyof SelectedSources, id: string) =>
+   302→    setSources((prev) => {
+   303→      const has = prev[kind].includes(id)
+   304→      return { ...prev, [kind]: has ? prev[kind].filter((x) => x !== id) : [...prev[kind], id] }
+   305→    })
+   306→
+   307→  const schedule = useMutation({
+   308→    mutationFn: () =>
+   309→      api<RecordingArtifact>('/api/recordings', {
+   310→        method: 'POST',
+   311→        body: JSON.stringify({
+   312→          deviceId: devId,
+   313→          durationSec,
+   314→          monitors: sources.monitors.length > 0 ? sources.monitors : undefined,
+   315→          cameras: sources.cameras.length > 0 ? sources.cameras : undefined,
+   316→          mics: sources.mics.length > 0 ? sources.mics : undefined,
+   317→          passphrase,
+   318→          label: label.trim() || undefined,
+   319→        }),
+   320→      }),
+   321→    onSuccess: (r) => {
+   322→      toast.success('Recording scheduled', {
+   323→        description: `${device?.hostname ?? 'device'} • ${Math.round(durationSec / 60)} min • armed`,
+   324→      })
+   325→      onScheduled(r)
+   326→      // hygiene: never keep the passphrase around longer than needed
+   327→      setPassphrase('')
+   328→      setConfirmPass('')
+   329→    },
+   330→    onError: (e) =>
+   331→      toast.error('Failed to schedule recording', {
+   332→        description: e instanceof Error ? e.message : 'Unknown error',
+   333→      }),
+   334→  })
+   335→
+   336→  return (
+   337→    <Panel className="card-sheen glass-hover flex flex-col gap-5 p-5 sm:p-6">
+   338→      <div>
+   339→        <h3 className="font-semibold">Schedule a recording</h3>
+   340→        <p className="text-sm text-muted-foreground">
+   341→          Armed on the device, recorded locally, uploaded encrypted when done.
+   342→        </p>
+   343→      </div>
+   344→
+   345→      <div className="flex flex-col gap-2">
+   346→        <Label className="text-xs uppercase tracking-wide text-muted-foreground">Device</Label>
+   347→        <DeviceSelector value={devId} onChange={setOverrideId} className="sm:w-full" />
+   348→      </div>
+   349→
+   350→      <div className="grid gap-3 sm:grid-cols-2">
+   351→        <div className="flex flex-col gap-2">
+   352→          <Label htmlFor="rec-label" className="text-xs uppercase tracking-wide text-muted-foreground">
+   353→            Label
+   354→          </Label>
+   355→          <Input
+   356→            id="rec-label"
+   357→            value={label}
+   358→            onChange={(e) => setLabel(e.target.value)}
+   359→            placeholder="e.g. Nightly audit trail"
+   360→            className="h-11 md:h-9"
+   361→            maxLength={80}
+   362→          />
+   363→        </div>
+   364→        <div className="flex flex-col gap-2">
+   365→          <Label htmlFor="rec-minutes" className="text-xs uppercase tracking-wide text-muted-foreground">
+   366→            Duration (minutes)
+   367→          </Label>
+   368→          <Input
+   369→            id="rec-minutes"
+   370→            type="number"
+   371→            min={1}
+   372→            max={1440}
+   373→            value={minutes}
+   374→            onChange={(e) => setMinutes(e.target.value)}
+   375→            className="h-11 md:h-9"
+   376→          />
+   377→          <div className="flex flex-wrap gap-1.5">
+   378→            {DURATION_CHIPS.map((m) => (
+   379→              <button
+   380→                key={m}
+   381→                type="button"
+   382→                onClick={() => setMinutes(String(m))}
+   383→                className={cn(
+   384→                  'min-h-8 rounded-full px-2.5 text-[11px] font-semibold outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring/60',
+   385→                  Number(minutes) === m
+   386→                    ? 'bg-primary/20 text-primary shadow-[inset_0_0_0_1px] shadow-primary/30'
+   387→                    : 'glass-inset text-muted-foreground hover:bg-primary/10 hover:text-foreground',
+   388→                )}
+   389→              >
+   390→                {m} min
+   391→              </button>
+   392→            ))}
+   393→          </div>
+   394→        </div>
+   395→      </div>
+   396→
+   397→      <div className="flex flex-col gap-2">
+   398→        <Label className="text-xs uppercase tracking-wide text-muted-foreground">
+   399→          Sources — at least one
+   400→        </Label>
+   401→        {hasCaps && caps ? (
+   402→          <div className="flex flex-col gap-2">
+   403→            {caps.monitors.length > 0 ? (
+   404→              <div className="flex flex-wrap gap-1.5">
+   405→                {caps.monitors.map((m) => (
+   406→                  <SourceChip
+   407→                    key={m.id}
+   408→                    icon={Monitor}
+   409→                    label={m.name}
+   410→                    selected={sources.monitors.includes(m.id)}
+   411→                    onToggle={() => toggle('monitors', m.id)}
+   412→                  />
+   413→                ))}
+   414→              </div>
+   415→            ) : null}
+   416→            {caps.cameras.length > 0 ? (
+   417→              <div className="flex flex-wrap gap-1.5">
+   418→                {caps.cameras.map((c) => (
+   419→                  <SourceChip
+   420→                    key={c.id}
+   421→                    icon={Camera}
+   422→                    label={c.name}
+   423→                    selected={sources.cameras.includes(c.id)}
+   424→                    onToggle={() => toggle('cameras', c.id)}
+   425→                  />
+   426→                ))}
+   427→              </div>
+   428→            ) : null}
+   429→            {caps.mics.length > 0 ? (
+   430→              <div className="flex flex-wrap gap-1.5">
+   431→                {caps.mics.map((m) => (
+   432→                  <SourceChip
+   433→                    key={m.id}
+   434→                    icon={Mic}
+   435→                    label={m.name}
+   436→                    selected={sources.mics.includes(m.id)}
+   437→                    onToggle={() => toggle('mics', m.id)}
+   438→                  />
+   439→                ))}
+   440→              </div>
+   441→            ) : null}
+   442→          </div>
+   443→        ) : (
+   444→          <p className="glass-inset flex items-start gap-2 rounded-xl px-3 py-2.5 text-xs text-muted-foreground">
+   445→            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" aria-hidden />
+   446→            This device did not report capture sources — the Python/Node agent is required before
+   447→            recording sources can be planned.
+   448→          </p>
+   449→        )}
+   450→      </div>
+   451→
+   452→      <div className="grid gap-3 sm:grid-cols-2">
+   453→        <div className="flex flex-col gap-2">
+   454→          <Label htmlFor="rec-pass" className="text-xs uppercase tracking-wide text-muted-foreground">
+   455→            Passphrase (min 8)
+   456→          </Label>
+   457→          <div className="relative">
+   458→            <Input
+   459→              id="rec-pass"
+   460→              type={showPass ? 'text' : 'password'}
+   461→              value={passphrase}
+   462→              onChange={(e) => setPassphrase(e.target.value)}
+   463→              placeholder="••••••••••••"
+   464→              autoComplete="new-password"
+   465→              className="h-11 pr-20 md:h-9"
+   466→            />
+   467→            <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center">
+   468→              <Button
+   469→                type="button"
+   470→                variant="ghost"
+   471→                size="icon"
+   472→                className="h-8 w-8"
+   473→                aria-label="Generate strong passphrase"
+   474→                title="Generate strong passphrase"
+   475→                onClick={() => {
+   476→                  const gen = generateStrongPassphrase()
+   477→                  setPassphrase(gen)
+   478→                  setConfirmPass(gen)
+   479→                  setShowPass(true)
+   480→                  toast.success('Strong passphrase generated', {
+   481→                    description: 'Copy it somewhere safe — it cannot be recovered.',
+   482→                  })
+   483→                }}
+   484→              >
+   485→                <Wand2 className="h-4 w-4" aria-hidden />
+   486→              </Button>
+   487→              <Button
+   488→                type="button"
+   489→                variant="ghost"
+   490→                size="icon"
+   491→                className="h-8 w-8"
+   492→                aria-label={showPass ? 'Hide passphrase' : 'Show passphrase'}
+   493→                onClick={() => setShowPass((v) => !v)}
+   494→              >
+   495→                {showPass ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
+   496→              </Button>
+   497→            </div>
+   498→          </div>
+   499→        </div>
+   500→        <div className="flex flex-col gap-2">
+   501→          <Label htmlFor="rec-pass-confirm" className="text-xs uppercase tracking-wide text-muted-foreground">
+   502→            Confirm passphrase
+   503→          </Label>
+   504→          <div className="relative">
+   505→            <Input
+   506→              id="rec-pass-confirm"
+   507→              type={showConfirm ? 'text' : 'password'}
+   508→              value={confirmPass}
+   509→              onChange={(e) => setConfirmPass(e.target.value)}
+   510→              autoComplete="new-password"
+   511→              className={cn(
+   512→                'h-11 pr-11 md:h-9',
+   513→                confirmPass.length > 0 && !confirmOk && 'border-rose-500/50',
+   514→              )}
+   515→            />
+   516→            <Button
+   517→              type="button"
+   518→              variant="ghost"
+   519→              size="icon"
+   520→              className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2"
+   521→              aria-label={showConfirm ? 'Hide confirmation' : 'Show confirmation'}
+   522→              onClick={() => setShowConfirm((v) => !v)}
+   523→            >
+   524→              {showConfirm ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
+   525→            </Button>
+   526→          </div>
+   527→          {confirmPass.length > 0 && !confirmOk ? (
+   528→            <p className="text-[11px] text-rose-500">Passphrases do not match.</p>
+   529→          ) : null}
+   530→        </div>
+   531→      </div>
+   532→
+   533→      {/* live key fingerprint preview */}
+   534→      <div className="glass-inset flex flex-wrap items-center gap-2 rounded-xl px-3 py-2.5">
+   535→        <ShieldCheck className="h-4 w-4 shrink-0 text-primary" aria-hidden />
+   536→        <span className="text-xs text-muted-foreground">Key fingerprint (sha256·12)</span>
+   537→        {passphrase && fingerprint ? (
+   538→          <Badge variant="secondary" className="font-mono text-[11px] tabular-nums">
+   539→            {fingerprint}
+   540→          </Badge>
+   541→        ) : (
+   542→          <span className="text-xs text-muted-foreground/60">enter a passphrase…</span>
+   543→        )}
+   544→        <span className="ml-auto text-[11px] text-muted-foreground/70">
+   545→          compare with the row chip later to verify your key
+   546→        </span>
+   547→      </div>
+   548→
+   549→      <Button
+   550→        size="lg"
+   551→        className="h-11 w-full"
+   552→        disabled={!valid || schedule.isPending}
+   553→        onClick={() => schedule.mutate()}
+   554→      >
+   555→        {schedule.isPending ? (
+   556→          <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
+   557→        ) : (
+   558→          <Radar className="h-5 w-5" aria-hidden />
+   559→        )}
+   560→        {schedule.isPending ? 'Arming…' : 'Schedule recording'}
+   561→      </Button>
+   562→      {!valid ? (
+   563→        <p className="text-center text-[11px] text-muted-foreground/70">
+   564→          {!devId
+   565→            ? 'select a device to continue'
+   566→            : durationSec < 60
+   567→              ? 'duration must be at least 1 minute'
+   568→              : sourceCount === 0
+   569→                ? 'pick at least one capture source'
+   570→                : !passOk
+   571→                  ? 'passphrase needs at least 8 characters'
+   572→                  : 'confirm the passphrase to arm'}
+   573→        </p>
+   574→      ) : null}
+   575→    </Panel>
+   576→  )
+   577→}
+   578→
+   579→// ──────────────────────── recording row ─────────────────────────────
+   580→
+   581→function RecordingRow({
+   582→  rec,
+   583→  hostname,
+   584→  now,
+   585→  onDownload,
+   586→  downloading,
+   587→  onCancel,
+   588→  canceling,
+   589→}: {
+   590→  rec: RecordingArtifact
+   591→  hostname: string
+   592→  now: number
+   593→  onDownload: (r: RecordingArtifact) => void
+   594→  downloading: boolean
+   595→  onCancel: (r: RecordingArtifact) => void
+   596→  canceling: boolean
+   597→}) {
+   598→  const sm = STATE_META[rec.state]
+   599→  const active = rec.state === 'armed' || rec.state === 'recording'
+   600→  const finished = rec.state === 'completed' || rec.state === 'failed' || rec.state === 'canceled'
+   601→
+   602→  // interpolated elapsed for the live progress bar (socket updates reconcile)
+   603→  let elapsedSec: number | null = null
+   604→  if (rec.state === 'recording' && rec.startedAt) {
+   605→    elapsedSec = Math.min(rec.durationSec, Math.max(0, (now - new Date(rec.startedAt).getTime()) / 1000))
+   606→  } else if (rec.state === 'recording') {
+   607→    elapsedSec = rec.durationSec // running but startedAt unknown — show full
+   608→  } else if (rec.state === 'armed') {
+   609→    elapsedSec = 0
+   610→  }
+   611→  const pct = active && elapsedSec != null ? Math.min(100, Math.round((elapsedSec / rec.durationSec) * 100)) : null
+   612→
+   613→  return (
+   614→    <div
+   615→      className={cn(
+   616→        'glass-inset glass-hover lift flex flex-col gap-2.5 rounded-2xl p-3.5',
+   617→        rec.state === 'recording' && 'ring-1 ring-rose-500/25',
+   618→        rec.state === 'armed' && 'ring-1 ring-amber-500/25',
+   619→      )}
+   620→    >
+   621→      <div className="flex flex-wrap items-center gap-2">
+   622→        <div className="glass flex h-8 w-8 shrink-0 items-center justify-center rounded-lg">
+   623→          <Disc3
+   624→            className={cn(
+   625→              'h-4 w-4',
+   626→              rec.state === 'recording' ? 'animate-spin text-rose-500' : 'text-muted-foreground',
+   627→            )}
+   628→            aria-hidden
+   629→          />
+   630→        </div>
+   631→        <div className="min-w-0 flex-1">
+   632→          <p className="truncate text-sm font-medium">
+   633→            {rec.label || `Recording — ${hostname}`}
+   634→          </p>
+   635→          <p className="truncate text-[11px] text-muted-foreground">
+   636→            {hostname} · {Math.max(1, Math.round(rec.durationSec / 60))} min ·{' '}
+   637→            <span title={fmtDate(rec.createdAt)}>{timeAgo(rec.createdAt)}</span>
+   638→          </p>
+   639→        </div>
+   640→        <Badge variant="outline" className={cn('gap-1.5', sm.className)}>
+   641→          {sm.pulse ? (
+   642→            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden />
+   643→          ) : null}
+   644→          {sm.label}
+   645→        </Badge>
+   646→      </div>
+   647→
+   648→      {/* live progress */}
+   649→      {active ? (
+   650→        <div className="flex flex-col gap-1">
+   651→          <div
+   652→            role="progressbar"
+   653→            aria-valuemin={0}
+   654→            aria-valuemax={100}
+   655→            aria-valuenow={pct ?? 0}
+   656→            aria-label={`Recording progress — ${rec.label || hostname}`}
+   657→            className="glass h-2 w-full overflow-hidden rounded-full"
+   658→          >
+   659→            <div
+   660→              className={cn(
+   661→                'h-full rounded-full transition-[width] duration-1000 ease-linear',
+   662→                rec.state === 'recording'
+   663→                  ? 'bg-gradient-to-r from-rose-500 to-rose-400'
+   664→                  : 'bg-amber-400/70',
+   665→              )}
+   666→              style={{ width: `${Math.max(pct ?? 0, 1.5)}%` }}
+   667→            />
+   668→          </div>
+   669→          <div className="flex flex-wrap items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground">
+   670→            <span className="font-mono">
+   671→              {rec.state === 'recording' && elapsedSec != null
+   672→                ? `${fmtElapsedSec(elapsedSec)} / ${fmtElapsedSec(rec.durationSec)}`
+   673→                : 'armed — waiting to start'}
+   674→            </span>
+   675→            {rec.state === 'recording' && rec.sizeBytes ? (
+   676→              <span className="font-mono">· {fmtBytes(rec.sizeBytes)} captured</span>
+   677→            ) : null}
+   678→          </div>
+   679→        </div>
+   680→      ) : null}
+   681→
+   682→      {/* completed / finished meta */}
+   683→      {!active ? (
+   684→        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+   685→          {rec.frames != null ? (
+   686→            <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+   687→              {rec.frames} frames
+   688→            </Badge>
+   689→          ) : null}
+   690→          {rec.sizeBytes != null ? (
+   691→            <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+   692→              {fmtBytes(rec.sizeBytes)}
+   693→            </Badge>
+   694→          ) : null}
+   695→          <Badge variant="outline" className="gap-1 border-emerald-500/30 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-400">
+   696→            <Lock className="h-3 w-3" aria-hidden /> {rec.encryption || 'AES-256-GCM'}
+   697→          </Badge>
+   698→          {rec.error ? (
+   699→            <span className="truncate text-rose-500" title={rec.error}>
+   700→              {rec.error}
+   701→            </span>
+   702→          ) : null}
+   703→          {rec.endedAt ? <span title={fmtDate(rec.endedAt)}>{timeAgo(rec.endedAt)}</span> : null}
+   704→        </div>
+   705→      ) : null}
+   706→
+   707→      <div className="flex flex-wrap items-center gap-2">
+   708→        {rec.keyFingerprint ? (
+   709→          <Badge
+   710→            variant="outline"
+   711→            className="border-border/60 bg-background/40 font-mono text-[10px] tabular-nums"
+   712→            title="sha256(passphrase)[0:12] — verify your key against this"
+   713→          >
+   714→            key {rec.keyFingerprint}
+   715→          </Badge>
+   716→        ) : null}
+   717→        <span className="truncate font-mono text-[10px] text-muted-foreground/60" title={rec.fileName ?? undefined}>
+   718→          {rec.fileName ?? rec.recordingId}
+   719→        </span>
+   720→
+   721→        <div className="ml-auto flex items-center gap-2">
+   722→          {active ? (
+   723→            <Button
+   724→              size="sm"
+   725→              variant="outline"
+   726→              className="h-8 border-amber-500/40 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+   727→              disabled={canceling}
+   728→              onClick={() => onCancel(rec)}
+   729→            >
+   730→              {canceling ? (
+   731→                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+   732→              ) : (
+   733→                <Square className="h-3.5 w-3.5" aria-hidden />
+   734→              )}
+   735→              Cancel
+   736→            </Button>
+   737→          ) : null}
+   738→          {rec.state === 'completed' ? (
+   739→            <Button
+   740→              size="sm"
+   741→              variant="outline"
+   742→              className="h-8 border-primary/40"
+   743→              disabled={downloading}
+   744→              onClick={() => onDownload(rec)}
+   745→            >
+   746→              {downloading ? (
+   747→                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+   748→              ) : (
+   749→                <Download className="h-3.5 w-3.5" aria-hidden />
+   750→              )}
+   751→              Download
+   752→            </Button>
+   753→          ) : null}
+   754→          {finished ? (
+   755→            <DeleteRecordingButton rec={rec} label={rec.label || hostname} />
+   756→          ) : null}
+   757→        </div>
+   758→      </div>
+   759→    </div>
+   760→  )
+   761→}
+   762→
+   763→function DeleteRecordingButton({ rec, label }: { rec: RecordingArtifact; label: string }) {
+   764→  const dropRecording = useDash((s) => s.dropRecording)
+   765→  const qc = useQueryClient()
+   766→  const del = useMutation({
+   767→    mutationFn: () => api<{ ok: true }>(`/api/recordings/${rec.id}`, { method: 'DELETE' }),
+   768→    onSuccess: () => {
+   769→      dropRecording(rec.id)
+   770→      qc.invalidateQueries({ queryKey: ['recordings'] })
+   771→      toast.success('Recording deleted', { description: 'row + encrypted file removed' })
+   772→    },
+   773→    onError: (e) =>
+   774→      toast.error('Failed to delete recording', {
+   775→        description: e instanceof Error ? e.message : 'Unknown error',
+   776→      }),
+   777→  })
+   778→  return (
+   779→    <AlertDialog>
+   780→      <AlertDialogTrigger asChild>
+   781→        <Button
+   782→          size="icon"
+   783→          variant="outline"
+   784→          className="h-8 w-8 shrink-0 border-rose-500/30 text-rose-500 hover:bg-rose-500/10 hover:text-rose-600"
+   785→          aria-label={`Delete recording ${label}`}
+   786→          disabled={del.isPending}
+   787→        >
+   788→          {del.isPending ? (
+   789→            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+   790→          ) : (
+   791→            <Trash2 className="h-3.5 w-3.5" aria-hidden />
+   792→          )}
+   793→        </Button>
+   794→      </AlertDialogTrigger>
+   795→      <AlertDialogContent className="glass-strong">
+   796→        <AlertDialogHeader>
+   797→          <AlertDialogTitle>Delete this recording?</AlertDialogTitle>
+   798→          <AlertDialogDescription>
+   799→            {label} — the encrypted .enc file is removed from the vault together with the row. A
+   800→            canceled/failed artifact cannot be recovered after deletion.
+   801→          </AlertDialogDescription>
+   802→        </AlertDialogHeader>
+   803→        <AlertDialogFooter>
+   804→          <AlertDialogCancel>Keep it</AlertDialogCancel>
+   805→          <AlertDialogAction
+   806→            className="bg-destructive text-white hover:bg-destructive/90"
+   807→            onClick={() => del.mutate()}
+   808→          >
+   809→            Delete permanently
+   810→          </AlertDialogAction>
+   811→        </AlertDialogFooter>
+   812→      </AlertDialogContent>
+   813→    </AlertDialog>
+   814→  )
+   815→}
+   816→
+   817→// ──────────────────────────── view ──────────────────────────────────
+   818→
+   819→export default function Recordings() {
+   820→  const qc = useQueryClient()
+   821→  const selectedDeviceId = useDash((s) => s.selectedDeviceId)
+   822→  const dropRecording = useDash((s) => s.dropRecording)
+   823→  const { data: devices } = useDevices()
+   824→  const recordingsQuery = useRecordings(null, 100)
+   825→
+   826→  const [scheduled, setScheduled] = useState<RecordingArtifact | null>(null)
+   827→  const [downloadingId, setDownloadingId] = useState<string | null>(null)
+   828→  const [cancelingId, setCancelingId] = useState<string | null>(null)
+   829→  const [now, setNow] = useState(() => Date.now())
+   830→
+   831→  // 1s ticker interpolates live progress between socket updates
+   832→  useEffect(() => {
+   833→    const t = setInterval(() => setNow(Date.now()), 1000)
+   834→    return () => clearInterval(t)
+   835→  }, [])
+   836→
+   837→  const hostnameOf = useMemo(() => {
+   838→    const map = new Map<string, string>()
+   839→    for (const d of devices ?? []) map.set(d.id, d.hostname)
+   840→    return map
+   841→  }, [devices])
+   842→
+   843→  const rows = recordingsQuery.data ?? []
+   844→  const activeCount = rows.filter((r) => r.state === 'armed' || r.state === 'recording').length
+   845→
+   846→  const cancel = useMutation({
+   847→    mutationFn: (r: RecordingArtifact) =>
+   848→      api<{ ok: true }>(`/api/recordings/${r.id}`, { method: 'DELETE' }),
+   849→    onSuccess: (_d, r) => {
+   850→      dropRecording(r.id)
+   851→      qc.invalidateQueries({ queryKey: ['recordings'] })
+   852→      toast.success('Cancel signal sent', {
+   853→        description: 'the agent stops recording and discards the artifact',
+   854→      })
+   855→    },
+   856→    onError: (e) =>
+   857→      toast.error('Failed to cancel recording', {
+   858→        description: e instanceof Error ? e.message : 'Unknown error',
+   859→      }),
+   860→    onSettled: () => setCancelingId(null),
+   861→  })
+   862→
+   863→  const download = async (r: RecordingArtifact) => {
+   864→    setDownloadingId(r.id)
+   865→    try {
+   866→      const res = await fetch(`/api/recordings/${r.id}/download`)
+   867→      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+   868→      const blob = await res.blob()
+   869→      const url = URL.createObjectURL(blob)
+   870→      const a = document.createElement('a')
+   871→      a.href = url
+   872→      a.download = `${r.recordingId}.enc`
+   873→      a.click()
+   874→      URL.revokeObjectURL(url)
+   875→      toast.success('Recording downloaded', {
+   876→        description: `${r.recordingId}.enc • ${fmtBytes(blob.size)} • decrypt with your passphrase`,
+   877→      })
+   878→    } catch (e) {
+   879→      toast.error('Download failed', {
+   880→        description: e instanceof Error ? e.message : 'Unknown error',
+   881→      })
+   882→    } finally {
+   883→      setDownloadingId(null)
+   884→    }
+   885→  }
+   886→
+   887→  const deviceForScheduler = useMemo(
+   888→    () => (devices ?? []).find((d) => d.id === selectedDeviceId) ?? null,
+   889→    [devices, selectedDeviceId],
+   890→  )
+   891→
+   892→  return (
+   893→    <div className="flex flex-col gap-4">
+   894→      <SectionHeader
+   895→        title="Recordings"
+   896→        subtitle="Scheduled encrypted on-device capture — armed, recorded offline, uploaded when done"
+   897→        icon={<Disc3 className="h-5 w-5" />}
+   898→        actions={
+   899→          <>
+   900→            {activeCount > 0 ? (
+   901→              <Badge
+   902→                variant="outline"
+   903→                className={cn(
+   904→                  'gap-1.5',
+   905→                  rows.some((r) => r.state === 'recording')
+   906→                    ? 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+   907→                    : 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+   908→                )}
+   909→              >
+   910→                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden />
+   911→                {activeCount} active
+   912→              </Badge>
+   913→            ) : null}
+   914→            <DecryptHelpPopover />
+   915→          </>
+   916→        }
+   917→      />
+   918→
+   919→      {/* transparency callout */}
+   920→      <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+   921→        <div className="flex items-start gap-2.5">
+   922→          <Radar className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" aria-hidden />
+   923→          <div className="flex flex-col gap-1">
+   924→            <p className="text-sm text-amber-700 dark:text-amber-400">
+   925→              The device user is notified when a recording is armed and sees a persistent on-screen
+   926→              indicator while it records. Recording runs locally on the device — even if this
+   927→              dashboard or the network goes offline — and the encrypted file uploads when the device
+   928→              reconnects.
+   929→            </p>
+   930→            <p className="text-xs text-amber-700/70 dark:text-amber-400/70">
+   931→              Simulated agents cap recordings at 2 minutes; real agents record the full duration.
+   932→            </p>
+   933→          </div>
+   934→        </div>
+   935→      </div>
+   936→
+   937→      <div className="grid gap-4 lg:grid-cols-[420px_1fr]">
+   938→        <div className="flex flex-col gap-4">
+   939→          <Scheduler device={deviceForScheduler} onScheduled={setScheduled} />
+   940→
+   941→          {/* success panel */}
+   942→          {scheduled ? (
+   943→            <div className="glass-inset flex flex-col gap-2 rounded-2xl border border-emerald-500/30 px-4 py-3.5">
+   944→              <div className="flex items-center gap-2">
+   945→                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" aria-hidden />
+   946→                <p className="text-sm font-medium">Recording armed</p>
+   947→                <Badge
+   948→                  variant="outline"
+   949→                  className={cn('ml-auto gap-1.5', STATE_META[scheduled.state].className)}
+   950→                >
+   951→                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden />
+   952→                  {STATE_META[scheduled.state].label}
+   953→                </Badge>
+   954→              </div>
+   955→              <p className="text-xs text-muted-foreground">
+   956→                {scheduled.label || 'Recording'} · {Math.max(1, Math.round(scheduled.durationSec / 60))} min on{' '}
+   957→                {hostnameOf.get(scheduled.deviceId) ?? scheduled.deviceId}
+   958→              </p>
+   959→              {scheduled.keyFingerprint ? (
+   960→                <div className="flex flex-wrap items-center gap-2">
+   961→                  <span className="text-xs text-muted-foreground">key fingerprint</span>
+   962→                  <Badge variant="secondary" className="font-mono text-[11px] tabular-nums">
+   963→                    {scheduled.keyFingerprint}
+   964→                  </Badge>
+   965→                  <span className="text-[11px] text-muted-foreground/70">
+   966→                    store it with your passphrase to verify later
+   967→                  </span>
+   968→                </div>
+   969→              ) : null}
+   970→              <p className="font-mono text-[10px] text-muted-foreground/60">
+   971→                id {scheduled.recordingId}
+   972→              </p>
+   973→            </div>
+   974→          ) : null}
+   975→        </div>
+   976→
+   977→        {/* recordings list */}
+   978→        <Panel className="flex min-w-0 flex-col gap-3 p-4 sm:p-5">
+   979→          <div className="flex items-center justify-between gap-2">
+   980→            <h3 className="font-semibold">Recording vault</h3>
+   981→            {rows.length > 0 ? (
+   982→              <span className="text-xs text-muted-foreground">
+   983→                {rows.length} artifact{rows.length === 1 ? '' : 's'}
+   984→              </span>
+   985→            ) : null}
+   986→          </div>
+   987→
+   988→          {recordingsQuery.isLoading ? (
+   989→            <LoadingBlock label="Loading recordings…" />
+   990→          ) : recordingsQuery.isError && rows.length === 0 ? (
+   991→            <ErrorBlock
+   992→              message={
+   993→                recordingsQuery.error instanceof Error
+   994→                  ? `Recordings unavailable — ${recordingsQuery.error.message}`
+   995→                  : 'Recordings unavailable'
+   996→              }
+   997→            />
+   998→          ) : rows.length === 0 ? (
+   999→            <EmptyState
+  1000→              icon={<Disc3 className="h-8 w-8" />}
+  1001→              title="No recordings yet"
+  1002→              hint="Schedule one on the left — armed recordings appear here with live progress."
+  1003→            />
+  1004→          ) : (
+  1005→            <div className="scroll-slim flex max-h-[720px] flex-col gap-2.5 overflow-y-auto pr-1">
+  1006→              {rows.map((r) => (
+  1007→                <RecordingRow
+  1008→                  key={r.id}
+  1009→                  rec={r}
+  1010→                  hostname={hostnameOf.get(r.deviceId) ?? r.deviceId}
+  1011→                  now={now}
+  1012→                  downloading={downloadingId === r.id}
+  1013→                  onDownload={(rec) => void download(rec)}
+  1014→                  canceling={cancelingId === r.id}
+  1015→                  onCancel={(rec) => {
+  1016→                    setCancelingId(rec.id)
+  1017→                    cancel.mutate(rec)
+  1018→                  }}
+  1019→                />
+  1020→              ))}
+  1021→            </div>
+  1022→          )}
+  1023→        </Panel>
+  1024→      </div>
+  1025→    </div>
+  1026→  )
+  1027→}
+  1028→

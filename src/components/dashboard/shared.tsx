@@ -233,6 +233,71 @@ export function RangePicker({
   )
 }
 
+/**
+ * String-valued sibling of RangePicker — a segmented glass radiogroup
+ * (used for the terminal shell picker: PowerShell / CMD / Auto).
+ */
+export interface SegmentedOption<T extends string> {
+  value: T
+  label: string
+  /** accessible title / hover tooltip (e.g. "Auto — PowerShell with CMD fallback") */
+  title?: string
+}
+
+export function SegmentedControl<T extends string>({
+  value,
+  onChange,
+  options,
+  label,
+  className,
+}: {
+  value: T
+  onChange: (v: T) => void
+  options: SegmentedOption<T>[]
+  label: string
+  className?: string
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className={cn(
+        'glass-inset inline-flex items-center gap-0.5 rounded-full p-0.5',
+        className,
+      )}
+    >
+      {options.map((opt) => {
+        const active = opt.value === value
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            title={opt.title ?? opt.label}
+            onClick={() => onChange(opt.value)}
+            className={cn(
+              'relative h-7 rounded-full px-3 text-[11px] font-semibold outline-none transition-all duration-200',
+              'focus-visible:ring-2 focus-visible:ring-ring/60',
+              active
+                ? 'bg-primary/20 text-primary shadow-[inset_0_0_0_1px] shadow-primary/30'
+                : 'text-muted-foreground hover:bg-primary/10 hover:text-foreground',
+            )}
+          >
+            {opt.label}
+            {active ? (
+              <span
+                aria-hidden
+                className="absolute inset-x-2.5 -bottom-px h-px rounded-full bg-primary/70 shadow-[0_0_8px] shadow-primary/60"
+              />
+            ) : null}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 export function LoadingBlock({ label = 'Loading…' }: { label?: string }) {
   return (
     <div className="glass-inset flex flex-col items-center justify-center gap-3 rounded-2xl px-6 py-10 text-sm text-muted-foreground">
@@ -289,7 +354,15 @@ export function DeviceSelector({
       value={value ?? '__none'}
       onValueChange={(v) => onChange(v === '__none' ? null : v)}
     >
-      <SelectTrigger className={cn('w-full sm:w-[280px]', className)} aria-label="Select device">
+      <SelectTrigger
+        className={cn(
+          // min-w-0 lets the trigger shrink below its (unbreakable) content —
+          // cuid hostnames otherwise force a 500px+ min-content width on mobile
+          'w-full sm:w-[280px] [&>span]:min-w-0 [&>span]:max-w-full',
+          className,
+        )}
+        aria-label="Select device"
+      >
         <SelectValue
           placeholder={isLoading ? 'Loading devices…' : 'Select a device…'}
         />
@@ -300,10 +373,14 @@ export function DeviceSelector({
         </SelectItem>
         {(devices ?? []).map((d) => (
           <SelectItem key={d.id} value={d.id}>
-            <span className="inline-flex items-center gap-2">
+            <span className="inline-flex min-w-0 items-center gap-2">
               <StatusDot online={d.status === 'online'} pulse={false} />
-              <span className="font-medium">{d.hostname}</span>
-              <span className="text-xs text-muted-foreground">{d.osName}</span>
+              <span className="min-w-0 truncate font-medium" title={d.hostname}>
+                {d.hostname}
+              </span>
+              <span className="min-w-0 truncate text-xs text-muted-foreground" title={d.osName}>
+                {d.osName}
+              </span>
             </span>
           </SelectItem>
         ))}

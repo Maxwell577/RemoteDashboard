@@ -16,6 +16,7 @@ import type {
 import type {
   Alert,
   AuditLog,
+  CaptureCapabilities,
   CaptureStatus,
   CommandExecution,
   CommandStatus,
@@ -28,10 +29,14 @@ import type {
   MediaAsset,
   MediaKind,
   MediaStatus,
+  MonitorSource,
+  CameraSource,
+  MicSource,
   NetworkCapture,
   ProcessInfo,
   ProcessSnapshot,
   SavedCommand,
+  ShellKind,
 } from "@/lib/types";
 
 // ─────────────────────────── primitives ────────────────────────────
@@ -67,6 +72,45 @@ export function parseProcessData(raw: string | null | undefined): ProcessInfo[] 
   } catch {
     return [];
   }
+}
+
+/** Safely parse a Device.captures JSON blob into CaptureCapabilities (null = legacy agent). */
+export function parseCaptures(raw: unknown): CaptureCapabilities | null {
+  if (!raw) return null;
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const cap = parsed as Partial<CaptureCapabilities>;
+  const strArr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  const monitors = Array.isArray(cap.monitors)
+    ? cap.monitors.filter(
+        (m): m is MonitorSource =>
+          !!m && typeof m === "object" && typeof (m as MonitorSource).id === "string" && typeof (m as MonitorSource).name === "string",
+      )
+    : [];
+  const cameras = Array.isArray(cap.cameras)
+    ? cap.cameras.filter(
+        (c): c is CameraSource => !!c && typeof c === "object" && typeof (c as CameraSource).id === "string",
+      )
+    : [];
+  const mics = Array.isArray(cap.mics)
+    ? cap.mics.filter(
+        (m): m is MicSource => !!m && typeof m === "object" && typeof (m as MicSource).id === "string",
+      )
+    : [];
+  return {
+    monitors,
+    cameras,
+    mics,
+    shells: strArr(cap.shells) as ShellKind[],
+    ...(Array.isArray(cap.notes) ? { notes: strArr(cap.notes) } : {}),
+  };
 }
 
 // ───────────────────────── enum coercion ───────────────────────────
@@ -130,10 +174,11 @@ export function toDevice(row: DeviceRow): Device {
     locationLabel: row.locationLabel,
     notes: row.notes,
     maintenance: row.maintenance,
+    captures: parseCaptures(row.captures),
   };
 }
 
-export function toCommand(row: CommandRow): CommandExecution {
+export function toCommand(row: CommandRow): CommandExecution & { effectiveShell: string | null } {
   return {
     id: row.id,
     deviceId: row.deviceId,
@@ -143,6 +188,8 @@ export function toCommand(row: CommandRow): CommandExecution {
     exitCode: row.exitCode,
     durationMs: row.durationMs,
     shell: row.shell,
+    // v0.3: the shell the agent actually used (powershell | cmd | bash).
+    effectiveShell: row.effectiveShell ?? null,
     createdBy: row.createdBy,
     createdAt: row.createdAt.toISOString(),
     completedAt: iso(row.completedAt),

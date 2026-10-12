@@ -4,6 +4,7 @@ import {
   Bell,
   Clapperboard,
   Cpu,
+  Disc3,
   FolderTree,
   LayoutDashboard,
   MapPin,
@@ -36,7 +37,7 @@ export const HOTKEY_VIEWS: {
   { view: 'terminal', key: '3', label: 'Terminal', icon: SquareTerminal },
   { view: 'files', key: '4', label: 'Files', icon: FolderTree },
   { view: 'processes', key: '5', label: 'Processes', icon: Cpu },
-  { view: 'media', key: '6', label: 'Media', icon: Clapperboard },
+  { view: 'media', key: '6', label: 'Streams', icon: Clapperboard },
   { view: 'network', key: '7', label: 'Network', icon: RadioTower },
   { view: 'location', key: '8', label: 'Location', icon: MapPin },
   { view: 'alerts', key: '9', label: 'Alerts', icon: Bell },
@@ -110,6 +111,13 @@ export default function ShortcutsDialog() {
                   </div>
                 )
               })}
+              <div className="flex items-center justify-between gap-2 py-1.5">
+                <span className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+                  <Disc3 className="size-3.5 shrink-0" aria-hidden />
+                  <span className="truncate">Recordings</span>
+                </span>
+                <span className="text-[10px] text-muted-foreground/60">via palette</span>
+              </div>
               <div className="flex items-center justify-between gap-2 py-1.5">
                 <span className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
                   <SettingsIcon className="size-3.5 shrink-0" aria-hidden />

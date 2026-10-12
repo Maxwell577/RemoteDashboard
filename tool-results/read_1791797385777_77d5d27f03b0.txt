@@ -1,0 +1,681 @@
+     1→// Simulated Windows agent. Connects to the hub over socket.io exactly like a
+     2→// real agent would (register → heartbeat → request/reply) and implements every
+     3→// agent-side request type from the SentraRMM contract.
+     4→
+     5→import { io, type Socket } from "socket.io-client";
+     6→import type { DeviceMetrics } from "../../../src/lib/types";
+     7→import { CONFIG, nextApi } from "../config";
+     8→import { clamp, fmtBytes, jitter, pick, postJson, rndInt, round1, round4 } from "../util";
+     9→import { runCommand, type ExecContext } from "./exec";
+    10→import { runCommandCmd } from "./cmd";
+    11→import { svgDesktop, svgPoster, svgWebcam, toDataUri } from "./media";
+    12→import { ProcTable } from "./proc";
+    13→import { SimRecorder } from "./record";
+    14→import type { DeviceDef } from "./devices";
+    15→import { seedDeviceFs, type Vfs } from "./vfs";
+    16→
+    17→interface RequestMsg {
+    18→  requestId: string;
+    19→  type: string;
+    20→  payload?: Record<string, unknown>;
+    21→}
+    22→
+    23→interface MediaCapture {
+    24→  assetId: string;
+    25→  kind: string;
+    26→  quality: string;
+    27→  withMic: boolean;
+    28→  startedAt: number;
+    29→  bytesPerSec: number;
+    30→  timer: ReturnType<typeof setTimeout> | null;
+    31→}
+    32→
+    33→interface NetCapture {
+    34→  captureId: string;
+    35→  iface: string;
+    36→  filterBpf: string | null;
+    37→  packets: number;
+    38→  bytesCaptured: number;
+    39→  timer: ReturnType<typeof setInterval> | null;
+    40→}
+    41→
+    42→interface LiveStream {
+    43→  seq: number;
+    44→  fps: number;
+    45→  startedAt: number;
+    46→  timer: ReturnType<typeof setInterval> | null;
+    47→}
+    48→
+    49→/** v0.3 multi-source stream (any number may run simultaneously). */
+    50→interface SimStream {
+    51→  streamId: string;
+    52→  kind: "screen" | "camera" | "mic";
+    53→  sourceId: string;
+    54→  fps: number;
+    55→  width: number;
+    56→  height: number;
+    57→  seq: number;
+    58→  timer: ReturnType<typeof setInterval> | null;
+    59→  startedAt: number;
+    60→}
+    61→
+    62→const str = (v: unknown): string => (typeof v === "string" ? v : "");
+    63→
+    64→export class SimAgent {
+    65→  readonly vfs: Vfs;
+    66→  private readonly procTable: ProcTable;
+    67→  private readonly socket: Socket;
+    68→  private readonly bootTime: number;
+    69→  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    70→  private lastMetrics: DeviceMetrics | null = null;
+    71→  private cpuHistory: number[] = [];
+    72→  private readonly media = new Map<string, MediaCapture>();
+    73→  private readonly net = new Map<string, NetCapture>();
+    74→  private live: LiveStream | null = null;
+    75→  private readonly streams = new Map<string, SimStream>();
+    76→  private recorder: SimRecorder | null = null;
+    77→  private cmdCwd: string;
+    78→  private stopped = false;
+    79→
+    80→  constructor(readonly def: DeviceDef) {
+    81→    this.vfs = seedDeviceFs(def);
+    82→    this.procTable = new ProcTable(def);
+    83→    this.bootTime = Date.now() - def.bootDaysAgo * 86_400_000 - rndInt(0, 3_600_000);
+    84→    this.cmdCwd = `C:\\Users\\${def.userName}`;
+    85→    this.socket = io(`http://127.0.0.1:${CONFIG.port}`, {
+    86→      path: "/",
+    87→      reconnectionDelayMax: 5000,
+    88→    });
+    89→  }
+    90→
+    91→  start(): void {
+    92→    const s = this.socket;
+    93→    s.on("connect", () => {
+    94→      this.log(`connected to hub (socket ${s.id})`);
+    95→      s.emit(
+    96→        "agent:register",
+    97→        { info: { ...this.def.info, captures: this.def.captures } },
+    98→        (ack?: { ok?: boolean }) => {
+    99→          if (ack?.ok) this.log("registered (captures: monitors/cameras/mics/shells reported)");
+   100→          else this.log("registration rejected by hub");
+   101→        },
+   102→      );
+   103→      this.ensureHeartbeat();
+   104→    });
+   105→    s.on("disconnect", (reason: string) => {
+   106→      this.log(`disconnected from hub (${reason}) — will reconnect`);
+   107→      // v0.3 contract: agents stop streaming when they disconnect. Recordings
+   108→      // keep running and buffer chunks until the hub is reachable again.
+   109→      this.stopAllStreams();
+   110→    });
+   111→    s.on("connect_error", (err: Error) => {
+   112→      this.log(`hub connect error: ${err.message} — retrying`);
+   113→    });
+   114→    s.on("agent:request", (msg: RequestMsg) => {
+   115→      void this.onRequest(msg);
+   116→    });
+   117→  }
+   118→
+   119→  stop(): void {
+   120→    this.stopped = true;
+   121→    if (this.heartbeatTimer) {
+   122→      clearInterval(this.heartbeatTimer);
+   123→      this.heartbeatTimer = null;
+   124→    }
+   125→    for (const cap of this.media.values()) {
+   126→      if (cap.timer) clearTimeout(cap.timer);
+   127→    }
+   128→    this.media.clear();
+   129→    for (const cap of this.net.values()) {
+   130→      if (cap.timer) clearInterval(cap.timer);
+   131→    }
+   132→    this.net.clear();
+   133→    if (this.live?.timer) clearInterval(this.live.timer);
+   134→    this.live = null;
+   135→    this.stopAllStreams();
+   136→    if (this.recorder && !this.recorder.isDone()) this.recorder.cancel();
+   137→    this.recorder = null;
+   138→    this.socket.disconnect();
+   139→  }
+   140→
+   141→  // ── telemetry ─────────────────────────────────────────────────────────
+   142→
+   143→  private ensureHeartbeat(): void {
+   144→    if (this.heartbeatTimer || this.stopped) return;
+   145→    this.heartbeatTimer = setInterval(() => this.beat(), CONFIG.heartbeatSec * 1000);
+   146→  }
+   147→
+   148→  private beat(): void {
+   149→    if (this.stopped || !this.socket.connected) return;
+   150→    const metrics = this.buildMetrics();
+   151→    this.socket.emit("agent:heartbeat", {
+   152→      agentId: this.def.info.agentId,
+   153→      metrics,
+   154→      location: this.locationFix(),
+   155→    });
+   156→    this.log(
+   157→      `heartbeat cpu=${metrics.cpuPercent}% mem=${metrics.memoryPercent}% disk=${metrics.diskPercent}% net=↑${metrics.netUpKBps}KBps ↓${metrics.netDownKBps}KBps`,
+   158→    );
+   159→  }
+   160→
+   161→  private buildMetrics(): DeviceMetrics {
+   162→    const d = this.def;
+   163→    const m: DeviceMetrics = {
+   164→      deviceId: d.info.agentId,
+   165→      cpuPercent: round1(clamp(jitter(d.cpuBase, d.cpuSpread), 3, 85)),
+   166→      memoryPercent: round1(clamp(jitter(d.memBase, d.memSpread), 8, 96)),
+   167→      diskPercent: d.diskPercent,
+   168→      uptimeSec: Math.floor((Date.now() - this.bootTime) / 1000),
+   169→      activeUsers: pick(d.activeUsers),
+   170→      netUpKBps: Math.max(1, Math.round(jitter(d.netUpBase, d.netUpSpread))),
+   171→      netDownKBps: Math.max(1, Math.round(jitter(d.netDownBase, d.netDownSpread))),
+   172→      capturedAt: new Date().toISOString(),
+   173→    };
+   174→    this.lastMetrics = m;
+   175→    this.cpuHistory.push(m.cpuPercent);
+   176→    if (this.cpuHistory.length > 64) this.cpuHistory.shift();
+   177→    return m;
+   178→  }
+   179→
+   180→  private execCtx(): ExecContext {
+   181→    const uptimeSec = Math.floor((Date.now() - this.bootTime) / 1000);
+   182→    return {
+   183→      def: this.def,
+   184→      procTable: this.procTable,
+   185→      vfs: this.vfs,
+   186→      uptimeSec,
+   187→      cpuPercent: this.lastMetrics?.cpuPercent ?? this.def.cpuBase,
+   188→      memPercent: this.lastMetrics?.memoryPercent ?? this.def.memBase,
+   189→      cwd: this.cmdCwd,
+   190→    };
+   191→  }
+   192→
+   193→  // ── request handling ──────────────────────────────────────────────────
+   194→
+   195→  private async onRequest(msg: RequestMsg): Promise<void> {
+   196→    if (this.stopped || !msg || typeof msg.requestId !== "string" || typeof msg.type !== "string") return;
+   197→    const payload = (msg.payload ?? {}) as Record<string, unknown>;
+   198→    try {
+   199→      const data = await this.handle(msg.type, payload);
+   200→      this.socket.emit("agent:reply", { requestId: msg.requestId, ok: true, data });
+   201→    } catch (err) {
+   202→      const error = err instanceof Error ? err.message : String(err);
+   203→      this.socket.emit("agent:reply", { requestId: msg.requestId, ok: false, error });
+   204→      this.log(`${msg.type} failed: ${error}`);
+   205→    }
+   206→  }
+   207→
+   208→  private async handle(type: string, p: Record<string, unknown>): Promise<unknown> {
+   209→    switch (type) {
+   210→      case "exec": {
+   211→        const command = str(p.command);
+   212→        const wanted = str(p.shell) || "powershell";
+   213→        const effective = wanted === "cmd" ? "cmd" : "powershell"; // sims always have powershell
+   214→        const r = effective === "cmd" ? await runCommandCmd(command, this.execCtx()) : await runCommand(command, this.execCtx());
+   215→        this.log(
+   216→          `exec [${effective}] '${command}' ${r.exitCode === 0 ? "ok" : `exit ${r.exitCode}`} (${r.durationMs}ms)`,
+   217→        );
+   218→        return r;
+   219→      }
+   220→      case "fs:list":
+   221→        return this.vfs.list(str(p.path));
+   222→      case "fs:download":
+   223→        return this.vfs.download(str(p.path));
+   224→      case "fs:upload":
+   225→        return this.vfs.upload(str(p.path), str(p.name), str(p.contentBase64));
+   226→      case "fs:delete":
+   227→        return this.vfs.remove(str(p.path));
+   228→      case "fs:rename":
+   229→        return this.vfs.rename(str(p.path), str(p.newName));
+   230→      case "fs:mkdir":
+   231→        return this.vfs.mkdir(str(p.path));
+   232→      case "ps:list":
+   233→        return { processes: this.procTable.list(), metrics: this.buildMetrics() };
+   234→      case "ps:action": {
+   235→        const res = this.procTable.action(Number(p.pid), str(p.action));
+   236→        this.log(`ps:action ${str(p.action)} pid=${p.pid} ok`);
+   237→        return res;
+   238→      }
+   239→      case "media:screenshot":
+   240→        return this.screenshot();
+   241→      case "media:record":
+   242→        return this.startMediaRecord(p);
+   243→      case "media:stop":
+   244→        return this.stopMediaRecord(str(p.assetId));
+   245→      case "net:start":
+   246→        return this.startNetCapture(p);
+   247→      case "net:stop":
+   248→        return this.stopNetCapture(str(p.captureId));
+   249→      case "location:fix":
+   250→        return this.locationFix();
+   251→      case "screen:live:start":
+   252→        return this.startLiveStream(p);
+   253→      case "screen:live:stop":
+   254→        return this.stopLiveStream();
+   255→      case "stream:start":
+   256→        return this.startStream(p);
+   257→      case "stream:stop":
+   258→        return this.stopStream(str(p.streamId));
+   259→      case "record:schedule":
+   260→        return this.scheduleRecording(p);
+   261→      case "record:cancel":
+   262→        return this.cancelRecording(str(p.recordingId));
+   263→      default:
+   264→        throw new Error(`Unknown request type '${type}'`);
+   265→    }
+   266→  }
+   267→
+   268→  // ── media ─────────────────────────────────────────────────────────────
+   269→
+   270→  private screenshot(): { dataUri: string; sizeBytes: number } {
+   271→    const m = this.lastMetrics;
+   272→    const svg = svgDesktop({
+   273→      hostname: this.def.info.hostname,
+   274→      ip: this.def.info.localIp,
+   275→      osLabel: `${this.def.info.osName} ${this.def.info.osVersion}`,
+   276→      agentVersion: this.def.info.agentVersion,
+   277→      cpu: m?.cpuPercent ?? this.def.cpuBase,
+   278→      mem: m?.memoryPercent ?? this.def.memBase,
+   279→      disk: this.def.diskPercent,
+   280→      // jittered per call → consecutive live-view frames differ (net meters + clock seconds)
+   281→      netUpKBps: Math.max(4, Math.round(jitter(this.def.netUpBase, this.def.netUpSpread))),
+   282→      netDownKBps: Math.max(16, Math.round(jitter(this.def.netDownBase, this.def.netDownSpread))),
+   283→      uptimeSec: Math.floor((Date.now() - this.bootTime) / 1000),
+   284→      cpuHistory: this.cpuHistory,
+   285→      palette: this.def.palette,
+   286→      accent: this.def.accent,
+   287→      now: new Date(),
+   288→    });
+   289→    return { dataUri: toDataUri(svg), sizeBytes: Buffer.byteLength(svg, "utf8") };
+   290→  }
+   291→
+   292→  private poster(cap: Pick<MediaCapture, "assetId" | "kind" | "quality">, elapsedSec: number): string {
+   293→    return toDataUri(
+   294→      svgPoster({
+   295→        hostname: this.def.info.hostname,
+   296→        kind: cap.kind,
+   297→        quality: cap.quality,
+   298→        assetId: cap.assetId,
+   299→        elapsedSec,
+   300→        palette: this.def.palette,
+   301→        accent: this.def.accent,
+   302→        camera: cap.kind === "camera_stream" || cap.kind === "call",
+   303→        mic: cap.kind === "mic_record",
+   304→      }),
+   305→    );
+   306→  }
+   307→
+   308→  private startMediaRecord(p: Record<string, unknown>): { started: true } {
+   309→    const assetId = str(p.assetId) || `asset-${Date.now()}`;
+   310→    const kind = str(p.kind) || "screen_record";
+   311→    const quality = str(p.quality) || "720p";
+   312→    const withMic = p.withMic === true;
+   313→    const durationSec = typeof p.durationSec === "number" ? p.durationSec : 0;
+   314→    if (this.media.has(assetId)) throw new Error(`Capture '${assetId}' is already running`);
+   315→
+   316→    const bytesPerSec =
+   317→      kind === "mic_record"
+   318→        ? 16_000
+   319→        : kind === "camera_stream" || kind === "call"
+   320→          ? 260_000
+   321→          : quality === "1080p"
+   322→            ? 760_000
+   323→            : quality === "480p"
+   324→              ? 190_000
+   325→              : quality === "source"
+   326→                ? 1_150_000
+   327→                : 390_000;
+   328→
+   329→    const cap: MediaCapture = { assetId, kind, quality, withMic, startedAt: Date.now(), bytesPerSec, timer: null };
+   330→    this.media.set(assetId, cap);
+   331→    this.emitEvent("media:update", { id: assetId, status: "capturing", kind, quality, withMic });
+   332→    this.log(`media:record ${assetId} capturing (${kind}, ${quality}, ${durationSec > 0 ? `${durationSec}s` : "indefinite"})`);
+   333→
+   334→    if (durationSec > 0) {
+   335→      cap.timer = setTimeout(() => {
+   336→        void this.finishMedia(cap, "available");
+   337→      }, Math.min(durationSec, 3600) * 1000);
+   338→    }
+   339→    return { started: true };
+   340→  }
+   341→
+   342→  private stopMediaRecord(assetId: string): { ok: true } {
+   343→    const cap = this.media.get(assetId);
+   344→    if (!cap) {
+   345→      this.log(`media:stop ${assetId}: no active capture (already finished)`);
+   346→      return { ok: true };
+   347→    }
+   348→    void this.finishMedia(cap, "stopped");
+   349→    return { ok: true };
+   350→  }
+   351→
+   352→  private async finishMedia(cap: MediaCapture, status: "available" | "stopped"): Promise<void> {
+   353→    if (cap.timer) {
+   354→      clearTimeout(cap.timer);
+   355→      cap.timer = null;
+   356→    }
+   357→    if (!this.media.has(cap.assetId) || this.stopped) return;
+   358→    this.media.delete(cap.assetId);
+   359→    const elapsed = (Date.now() - cap.startedAt) / 1000;
+   360→    const sizeBytes = Math.max(24_000, Math.round(cap.bytesPerSec * elapsed * (0.85 + Math.random() * 0.3)));
+   361→    const dataRef = this.poster(cap, elapsed);
+   362→    this.log(`media:record ${cap.assetId} ${status} (${fmtBytes(sizeBytes)}, ${Math.round(elapsed)}s)`);
+   363→    this.emitEvent("media:update", { id: cap.assetId, status, sizeBytes });
+   364→    await postJson(
+   365→      nextApi("/api/internal/media/result"),
+   366→      { assetId: cap.assetId, status, sizeBytes, dataRef },
+   367→      { "x-hub-token": CONFIG.hubToken },
+   368→    );
+   369→  }
+   370→
+   371→  // ── live screen stream ────────────────────────────────────────────────
+   372→
+   373→  private startLiveStream(p: Record<string, unknown>): { started: true; fps: number } {
+   374→    if (this.live) throw new Error("A live screen stream is already running");
+   375→    const fps = Math.min(3, Math.max(0.5, typeof p.fps === "number" && p.fps > 0 ? p.fps : 1));
+   376→    const stream: LiveStream = { seq: 0, fps, startedAt: Date.now(), timer: null };
+   377→    this.live = stream;
+   378→    const interval = Math.round(1000 / fps);
+   379→    stream.timer = setInterval(() => {
+   380→      if (!this.live || this.stopped || !this.socket.connected) return;
+   381→      stream.seq += 1;
+   382→      const shot = this.screenshot();
+   383→      this.socket.emit("agent:event", {
+   384→        name: "screen:frame",
+   385→        payload: {
+   386→          agentId: this.def.info.agentId,
+   387→          dataUri: shot.dataUri,
+   388→          ts: Date.now(),
+   389→          seq: stream.seq,
+   390→          width: 1600,
+   391→          height: 900,
+   392→        },
+   393→      });
+   394→    }, interval);
+   395→    this.log(`screen:live started (${fps} fps)`);
+   396→    return { started: true, fps };
+   397→  }
+   398→
+   399→  private stopLiveStream(): { frames: number } {
+   400→    const stream = this.live;
+   401→    if (!stream) return { frames: 0 };
+   402→    if (stream.timer) clearInterval(stream.timer);
+   403→    this.live = null;
+   404→    this.log(`screen:live stopped (${stream.seq} frames streamed)`);
+   405→    return { frames: stream.seq };
+   406→  }
+   407→
+   408→  // ── v0.3 multi-source streams ─────────────────────────────────────────
+   409→
+   410→  private num(v: unknown): number | null {
+   411→    return typeof v === "number" && Number.isFinite(v) ? v : null;
+   412→  }
+   413→
+   414→  private startStream(p: Record<string, unknown>): { started: true; meta: Record<string, unknown> } {
+   415→    const streamId = str(p.streamId);
+   416→    if (!streamId) throw new Error("streamId is required");
+   417→    const kind = str(p.kind);
+   418→    if (kind !== "screen" && kind !== "camera" && kind !== "mic") {
+   419→      throw new Error("kind must be one of: screen, camera, mic");
+   420→    }
+   421→    if (this.streams.has(streamId)) throw new Error(`Stream '${streamId}' is already running`);
+   422→    const caps = this.def.captures;
+   423→
+   424→    let stream: SimStream;
+   425→    let meta: Record<string, unknown>;
+   426→    if (kind === "screen") {
+   427→      const sourceId = str(p.sourceId) || caps.monitors[0]?.id || "monitor:0";
+   428→      const idx = caps.monitors.findIndex((m) => m.id === sourceId);
+   429→      if (idx < 0) {
+   430→        throw new Error(
+   431→          `Unknown monitor '${sourceId}' — available: ${caps.monitors.map((m) => m.id).join(", ") || "none"}`,
+   432→        );
+   433→      }
+   434→      const mon = caps.monitors[idx]!;
+   435→      const fps = clamp(this.num(p.fps) ?? 2, 0.5, 5);
+   436→      stream = { streamId, kind, sourceId, fps, width: mon.width, height: mon.height, seq: 0, timer: null, startedAt: Date.now() };
+   437→      meta = { width: mon.width, height: mon.height, fps, sourceId, name: mon.name, primary: mon.primary };
+   438→    } else if (kind === "camera") {
+   439→      const sourceId = str(p.sourceId) || caps.cameras[0]?.id || "camera:0";
+   440→      const idx = caps.cameras.findIndex((c) => c.id === sourceId);
+   441→      if (idx < 0) {
+   442→        throw new Error(`Unknown camera '${sourceId}' — available: ${caps.cameras.map((c) => c.id).join(", ") || "none"}`);
+   443→      }
+   444→      const fps = clamp(this.num(p.fps) ?? 10, 1, 15);
+   445→      stream = { streamId, kind, sourceId, fps, width: 1280, height: 720, seq: 0, timer: null, startedAt: Date.now() };
+   446→      meta = { width: 1280, height: 720, fps, sourceId, name: caps.cameras[idx]!.name };
+   447→    } else {
+   448→      const sourceId = str(p.sourceId) || caps.mics[0]?.id || "mic:0";
+   449→      const idx = caps.mics.findIndex((m) => m.id === sourceId);
+   450→      if (idx < 0) {
+   451→        throw new Error(`Unknown mic '${sourceId}' — available: ${caps.mics.map((m) => m.id).join(", ") || "none"}`);
+   452→      }
+   453→      stream = { streamId, kind, sourceId, fps: 8, width: 0, height: 0, seq: 0, timer: null, startedAt: Date.now() };
+   454→      meta = { fps: 8, sourceId, name: caps.mics[idx]!.name };
+   455→    }
+   456→
+   457→    this.streams.set(streamId, stream);
+   458→    const interval = Math.round(1000 / stream.fps);
+   459→    stream.timer = setInterval(() => this.emitStreamFrame(stream), interval);
+   460→    this.log(`stream:start ${kind} '${stream.sourceId}' @${stream.fps}fps (streamId ${streamId.slice(0, 8)}…, ${this.streams.size} active)`);
+   461→    return { started: true, meta };
+   462→  }
+   463→
+   464→  private emitStreamFrame(stream: SimStream): void {
+   465→    if (this.stopped || !this.socket.connected) return;
+   466→    stream.seq += 1;
+   467→    const frame: Record<string, unknown> = {
+   468→      agentId: this.def.info.agentId,
+   469→      streamId: stream.streamId,
+   470→      kind: stream.kind,
+   471→      ts: Date.now(),
+   472→      seq: stream.seq,
+   473→    };
+   474→    if (stream.kind === "screen") {
+   475→      const shot = this.renderScreenSource(stream.sourceId, 1600, 900);
+   476→      frame.dataUri = shot.dataUri;
+   477→      frame.width = shot.width;
+   478→      frame.height = shot.height;
+   479→    } else if (stream.kind === "camera") {
+   480→      const idx = Math.max(0, this.def.captures.cameras.findIndex((c) => c.id === stream.sourceId));
+   481→      const shot = this.renderCameraSource(stream.sourceId, idx);
+   482→      frame.dataUri = shot.dataUri;
+   483→      frame.width = 1280;
+   484→      frame.height = 720;
+   485→    } else {
+   486→      frame.level = this.micLevel();
+   487→    }
+   488→    this.socket.emit("agent:event", { name: "stream:frame", payload: frame });
+   489→  }
+   490→
+   491→  private stopStream(streamId: string): { frames: number } {
+   492→    const stream = this.streams.get(streamId);
+   493→    if (!stream) return { frames: 0 };
+   494→    if (stream.timer) clearInterval(stream.timer);
+   495→    this.streams.delete(streamId);
+   496→    this.log(`stream:stop ${stream.kind} '${stream.sourceId}' (${stream.seq} frames streamed, ${this.streams.size} active)`);
+   497→    return { frames: stream.seq };
+   498→  }
+   499→
+   500→  private stopAllStreams(): void {
+   501→    for (const stream of this.streams.values()) {
+   502→      if (stream.timer) clearInterval(stream.timer);
+   503→    }
+   504→    if (this.streams.size > 0) {
+   505→      this.log(`all ${this.streams.size} active stream(s) stopped (agent disconnect)`);
+   506→    }
+   507→    this.streams.clear();
+   508→  }
+   509→
+   510→  /** SVG desktop render for a monitor source (variant 1 = second display). */
+   511→  private renderScreenSource(sourceId: string, w: number, h: number): { dataUri: string; width: number; height: number } {
+   512→    const idx = Math.max(0, this.def.captures.monitors.findIndex((m) => m.id === sourceId));
+   513→    const m = this.lastMetrics;
+   514→    const svg = svgDesktop({
+   515→      hostname: this.def.info.hostname,
+   516→      ip: this.def.info.localIp,
+   517→      osLabel: `${this.def.info.osName} ${this.def.info.osVersion}`,
+   518→      agentVersion: this.def.info.agentVersion,
+   519→      cpu: m?.cpuPercent ?? this.def.cpuBase,
+   520→      mem: m?.memoryPercent ?? this.def.memBase,
+   521→      disk: this.def.diskPercent,
+   522→      netUpKBps: Math.max(4, Math.round(jitter(this.def.netUpBase, this.def.netUpSpread))),
+   523→      netDownKBps: Math.max(16, Math.round(jitter(this.def.netDownBase, this.def.netDownSpread))),
+   524→      uptimeSec: Math.floor((Date.now() - this.bootTime) / 1000),
+   525→      cpuHistory: this.cpuHistory,
+   526→      palette: this.def.palette,
+   527→      accent: this.def.accent,
+   528→      now: new Date(),
+   529→      w,
+   530→      h,
+   531→      variant: idx === 0 ? 0 : 1,
+   532→    });
+   533→    return { dataUri: toDataUri(svg), width: w, height: h };
+   534→  }
+   535→
+   536→  private renderCameraSource(sourceId: string, idx: number): { dataUri: string; width: number; height: number } {
+   537→    const cam = this.def.captures.cameras[idx] ?? { id: sourceId, name: "Camera" };
+   538→    const svg = svgWebcam({
+   539→      hostname: this.def.info.hostname,
+   540→      cameraId: cam.id,
+   541→      cameraName: cam.name,
+   542→      elapsedSec: (Date.now() - this.bootTime) / 1000,
+   543→      now: new Date(),
+   544→      accent: this.def.accent,
+   545→      variant: idx % 2,
+   546→    });
+   547→    return { dataUri: toDataUri(svg), width: 1280, height: 720 };
+   548→  }
+   549→
+   550→  /** Mic input level 0.05..0.9 (sinusoid + noise), 8 Hz cadence. */
+   551→  private micLevel(): number {
+   552→    const t = Date.now() / 1000;
+   553→    const base = 0.475 + 0.32 * Math.sin(t * 2.2) + 0.1 * Math.sin(t * 5.7);
+   554→    const noise = (Math.random() * 2 - 1) * 0.08;
+   555→    return Number(clamp(base + noise, 0.05, 0.9).toFixed(3));
+   556→  }
+   557→
+   558→  // ── v0.3 scheduled recordings ─────────────────────────────────────────
+   559→
+   560→  private scheduleRecording(p: Record<string, unknown>): { accepted: true; state: "armed" } {
+   561→    const recordingId = str(p.recordingId);
+   562→    if (!recordingId) throw new Error("recordingId is required");
+   563→    if (this.recorder && !this.recorder.isDone()) {
+   564→      throw new Error("A recording is already active on this device");
+   565→    }
+   566→    const passphrase = str(p.passphrase);
+   567→    if (!passphrase) throw new Error("passphrase is required");
+   568→    const durationSec = clamp(Math.round(this.num(p.durationSec) ?? 0), 5, 120); // sim hard cap: 120s
+   569→    const list = (v: unknown): string[] | undefined =>
+   570→      Array.isArray(v) && v.length > 0 ? v.filter((x): x is string => typeof x === "string") : undefined;
+   571→    const sources = {
+   572→      ...(list(p.monitors) ? { monitors: list(p.monitors) } : {}),
+   573→      ...(list(p.cameras) ? { cameras: list(p.cameras) } : {}),
+   574→      ...(list(p.mics) ? { mics: list(p.mics) } : {}),
+   575→    };
+   576→    const label = str(p.label) || null;
+   577→    this.log(
+   578→      `record:schedule ${recordingId} armed (${durationSec}s) — on-device notice shown, indicator will be visible while recording`,
+   579→    );
+   580→    this.recorder = new SimRecorder({
+   581→      socket: this.socket,
+   582→      agentId: this.def.info.agentId,
+   583→      hostname: this.def.info.hostname,
+   584→      recordingId,
+   585→      durationSec,
+   586→      passphrase,
+   587→      label,
+   588→      sources,
+   589→      renderScreen: (sourceId) => this.renderScreenSource(sourceId, 1280, 720),
+   590→      renderCamera: (sourceId) =>
+   591→        this.renderCameraSource(sourceId, Math.max(0, this.def.captures.cameras.findIndex((c) => c.id === sourceId))),
+   592→      micLevel: () => this.micLevel(),
+   593→      log: (msg) => this.log(msg),
+   594→    });
+   595→    return { accepted: true, state: "armed" };
+   596→  }
+   597→
+   598→  private cancelRecording(recordingId: string): { ok: true; state: string } {
+   599→    if (!this.recorder || this.recorder.isDone()) {
+   600→      this.log(`record:cancel ${recordingId}: no active recording`);
+   601→      return { ok: true, state: "idle" };
+   602→    }
+   603→    this.recorder.cancel();
+   604→    return { ok: true, state: "canceled" };
+   605→  }
+   606→
+   607→  // ── network capture ───────────────────────────────────────────────────
+   608→
+   609→  private startNetCapture(p: Record<string, unknown>): { started: true } {
+   610→    const captureId = str(p.captureId) || `cap-${Date.now()}`;
+   611→    if (this.net.has(captureId)) throw new Error(`Capture '${captureId}' is already running`);
+   612→    const cap: NetCapture = {
+   613→      captureId,
+   614→      iface: str(p.iface) || "Ethernet",
+   615→      filterBpf: str(p.filterBpf) || null,
+   616→      packets: 0,
+   617→      bytesCaptured: 0,
+   618→      timer: null,
+   619→    };
+   620→    this.net.set(captureId, cap);
+   621→    cap.timer = setInterval(() => {
+   622→      cap.packets += rndInt(20, 80);
+   623→      cap.bytesCaptured += rndInt(2_048, 61_440);
+   624→      this.emitEvent("network:update", {
+   625→        id: captureId,
+   626→        status: "running",
+   627→        packets: cap.packets,
+   628→        bytesCaptured: cap.bytesCaptured,
+   629→      });
+   630→      void postJson(
+   631→        nextApi("/api/internal/network/stats"),
+   632→        { captureId, packets: cap.packets, bytesCaptured: cap.bytesCaptured },
+   633→        { "x-hub-token": CONFIG.hubToken },
+   634→      );
+   635→    }, 3000);
+   636→    this.log(`net:capture ${captureId} started on ${cap.iface}${cap.filterBpf ? ` (bpf: ${cap.filterBpf})` : ""}`);
+   637→    return { started: true };
+   638→  }
+   639→
+   640→  private stopNetCapture(captureId: string): { packets: number; bytesCaptured: number } {
+   641→    const cap = this.net.get(captureId);
+   642→    if (!cap) throw new Error(`No active capture '${captureId}'`);
+   643→    if (cap.timer) {
+   644→      clearInterval(cap.timer);
+   645→      cap.timer = null;
+   646→    }
+   647→    this.net.delete(captureId);
+   648→    this.log(`net:capture ${captureId} stopped (${cap.packets} packets, ${fmtBytes(cap.bytesCaptured)})`);
+   649→    this.emitEvent("network:update", {
+   650→      id: captureId,
+   651→      status: "stopped",
+   652→      packets: cap.packets,
+   653→      bytesCaptured: cap.bytesCaptured,
+   654→    });
+   655→    return { packets: cap.packets, bytesCaptured: cap.bytesCaptured };
+   656→  }
+   657→
+   658→  // ── location ──────────────────────────────────────────────────────────
+   659→
+   660→  private locationFix(): { lat: number; lon: number; accuracyM: number; label: string; source: "ip" } {
+   661→    const base = this.def.location;
+   662→    return {
+   663→      lat: round4(jitter(base.lat, 0.01)),
+   664→      lon: round4(jitter(base.lon, 0.01)),
+   665→      accuracyM: rndInt(12, 80),
+   666→      label: base.label,
+   667→      source: "ip",
+   668→    };
+   669→  }
+   670→
+   671→  // ── misc ──────────────────────────────────────────────────────────────
+   672→
+   673→  private emitEvent(name: string, payload: Record<string, unknown>): void {
+   674→    this.socket.emit("agent:event", { name, payload });
+   675→  }
+   676→
+   677→  private log(msg: string): void {
+   678→    console.log(`[SIM:${this.def.info.hostname}] ${msg}`);
+   679→  }
+   680→}
+   681→

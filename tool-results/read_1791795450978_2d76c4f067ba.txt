@@ -1,0 +1,811 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useRef, useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import {
+     7→  Camera,
+     8→  Clapperboard,
+     9→  Download,
+    10→  Eye,
+    11→  Loader2,
+    12→  Lock,
+    13→  Mic,
+    14→  MonitorPlay,
+    15→  PhoneCall,
+    16→  ShieldCheck,
+    17→  Square,
+    18→  Trash2,
+    19→  Video,
+    20→  Zap,
+    21→  type LucideIcon,
+    22→} from 'lucide-react'
+    23→import {
+    24→  api,
+    25→  type AppSettings,
+    26→  type Device,
+    27→  type MediaAsset,
+    28→  type MediaKind,
+    29→  type MediaStatus,
+    30→} from '@/lib/types'
+    31→import { useDash } from '@/lib/store'
+    32→import { cn } from '@/lib/utils'
+    33→import {
+    34→  DeviceSelector,
+    35→  EmptyState,
+    36→  ErrorBlock,
+    37→  LoadingBlock,
+    38→  Panel,
+    39→  SectionHeader,
+    40→  fmtBytes,
+    41→  fmtDate,
+    42→  timeAgo,
+    43→  useDevices,
+    44→} from '../shared'
+    45→import { Badge } from '@/components/ui/badge'
+    46→import { Button } from '@/components/ui/button'
+    47→import {
+    48→  Dialog,
+    49→  DialogContent,
+    50→  DialogDescription,
+    51→  DialogHeader,
+    52→  DialogTitle,
+    53→} from '@/components/ui/dialog'
+    54→import {
+    55→  AlertDialog,
+    56→  AlertDialogAction,
+    57→  AlertDialogCancel,
+    58→  AlertDialogContent,
+    59→  AlertDialogDescription,
+    60→  AlertDialogFooter,
+    61→  AlertDialogHeader,
+    62→  AlertDialogTitle,
+    63→  AlertDialogTrigger,
+    64→} from '@/components/ui/alert-dialog'
+    65→import { Input } from '@/components/ui/input'
+    66→import { Label } from '@/components/ui/label'
+    67→import {
+    68→  Select,
+    69→  SelectContent,
+    70→  SelectItem,
+    71→  SelectTrigger,
+    72→  SelectValue,
+    73→} from '@/components/ui/select'
+    74→import { Switch } from '@/components/ui/switch'
+    75→
+    76→// ─────────────────────────── helpers ────────────────────────────────
+    77→
+    78→const KIND_META: Record<MediaKind, { label: string; icon: LucideIcon }> = {
+    79→  screenshot: { label: 'Screenshot', icon: Camera },
+    80→  screen_record: { label: 'Screen recording', icon: MonitorPlay },
+    81→  mic_record: { label: 'Microphone only', icon: Mic },
+    82→  camera_stream: { label: 'Camera stream', icon: Video },
+    83→  call: { label: 'Video call', icon: PhoneCall },
+    84→}
+    85→
+    86→const ACTIVE_STATUSES: MediaStatus[] = ['requested', 'capturing', 'processing']
+    87→
+    88→function statusBadge(status: MediaStatus): { label: string; className: string; pulse: boolean } {
+    89→  switch (status) {
+    90→    case 'available':
+    91→      return {
+    92→        label: 'available',
+    93→        className: 'border-emerald-500/30 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
+    94→        pulse: false,
+    95→      }
+    96→    case 'capturing':
+    97→      return {
+    98→        label: 'capturing',
+    99→        className: 'border-amber-500/30 bg-amber-500/15 text-amber-600 dark:text-amber-400',
+   100→        pulse: true,
+   101→      }
+   102→    case 'requested':
+   103→      return {
+   104→        label: 'requested',
+   105→        className: 'border-amber-500/30 bg-amber-500/15 text-amber-600 dark:text-amber-400',
+   106→        pulse: true,
+   107→      }
+   108→    case 'processing':
+   109→      return {
+   110→        label: 'processing',
+   111→        className: 'border-teal-500/30 bg-teal-500/15 text-teal-600 dark:text-teal-400',
+   112→        pulse: true,
+   113→      }
+   114→    case 'failed':
+   115→      return {
+   116→        label: 'failed',
+   117→        className: 'border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-400',
+   118→        pulse: false,
+   119→      }
+   120→    case 'stopped':
+   121→      return {
+   122→        label: 'stopped',
+   123→        className: 'border-zinc-500/30 bg-zinc-500/15 text-zinc-600 dark:text-zinc-400',
+   124→        pulse: false,
+   125→      }
+   126→  }
+   127→}
+   128→
+   129→function fmtElapsed(ms: number): string {
+   130→  const s = Math.max(0, Math.floor(ms / 1000))
+   131→  const h = Math.floor(s / 3600)
+   132→  const m = Math.floor((s % 3600) / 60)
+   133→  const sec = s % 60
+   134→  const pad = (n: number) => String(n).padStart(2, '0')
+   135→  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`
+   136→}
+   137→
+   138→function fmtDurationLabel(durationSec: number | null): string {
+   139→  if (!durationSec) return 'indefinite'
+   140→  if (durationSec < 60) return `${durationSec}s`
+   141→  if (durationSec < 3600) return `${Math.floor(durationSec / 60)} min`
+   142→  return `${Math.floor(durationSec / 3600)} h`
+   143→}
+   144→
+   145→// ───────────────────────── live view dialog ─────────────────────────
+   146→
+   147→/**
+   148→ * Live screen viewer — one-way socket stream (`screen:frame`).
+   149→ * Frames are rendered straight from the store; nothing is persisted.
+   150→ */
+   151→function LiveViewDialog({
+   152→  device,
+   153→  open,
+   154→  onOpenChange,
+   155→  now,
+   156→}: {
+   157→  device: Device | null
+   158→  open: boolean
+   159→  onOpenChange: (o: boolean) => void
+   160→  now: number
+   161→}) {
+   162→  const liveFrame = useDash((s) => s.liveFrame)
+   163→  const clearLiveFrame = useDash((s) => s.setLiveFrame)
+   164→  const { data: devices } = useDevices()
+   165→  const [fps, setFps] = useState(0)
+   166→  const frameTimes = useRef<number[]>([])
+   167→  const startedAt = useRef<number>(Date.now())
+   168→
+   169→  const frame = useMemo(() => {
+   170→    if (!liveFrame || !device) return null
+   171→    if (liveFrame.agentId === device.id) return liveFrame
+   172→    const matchesAgent = (devices ?? []).some(
+   173→      (d) => d.id === device.id && d.agentId === liveFrame.agentId,
+   174→    )
+   175→    return matchesAgent ? liveFrame : null
+   176→  }, [liveFrame, device, devices])
+   177→
+   178→  // record frame arrivals (one effect per frame, no timers)
+   179→  useEffect(() => {
+   180→    if (!open || frame?.seq == null) return
+   181→    const t = Date.now()
+   182→    frameTimes.current = [...frameTimes.current, t].filter((x) => t - x <= 4000)
+   183→  }, [open, frame?.seq])
+   184→
+   185→  // FPS meter — independent 1s ticker over the trailing 4s window
+   186→  useEffect(() => {
+   187→    if (!open) return
+   188→    const iv = setInterval(() => {
+   189→      const t = Date.now()
+   190→      frameTimes.current = frameTimes.current.filter((x) => t - x <= 4000)
+   191→      setFps(Math.round((frameTimes.current.length / 4) * 10) / 10)
+   192→    }, 1000)
+   193→    return () => clearInterval(iv)
+   194→  }, [open])
+   195→
+   196→  useEffect(() => {
+   197→    if (open) startedAt.current = Date.now()
+   198→  }, [open])
+   199→
+   200→  const stop = useMutation({
+   201→    mutationFn: () =>
+   202→      api<{ ok: true }>('/api/media/live', {
+   203→        method: 'POST',
+   204→        body: JSON.stringify({ deviceId: device?.id, action: 'stop' }),
+   205→      }),
+   206→    onSettled: () => clearLiveFrame(null),
+   207→  })
+   208→
+   209→  const handleClose = (o: boolean) => {
+   210→    if (!o && open) stop.mutate()
+   211→    onOpenChange(o)
+   212→  }
+   213→
+   214→  return (
+   215→    <Dialog open={open} onOpenChange={handleClose}>
+   216→      <DialogContent className="glass-strong sm:max-w-4xl">
+   217→        <DialogHeader>
+   218→          <DialogTitle className="flex items-center gap-2">
+   219→            <span className="relative flex h-2.5 w-2.5">
+   220→              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-70" />
+   221→              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-rose-500" />
+   222→            </span>
+   223→            Live view — {device?.hostname ?? 'device'}
+   224→          </DialogTitle>
+   225→          <DialogDescription>
+   226→            Realtime one-way stream over the agent socket · never persisted · encrypted transport
+   227→          </DialogDescription>
+   228→        </DialogHeader>
+   229→
+   230→        <div className="overflow-hidden rounded-xl ring-1 ring-border/60">
+   231→          {frame ? (
+   232→            <img
+   233→              src={frame.dataUri}
+   234→              alt={`Live screen of ${device?.hostname ?? 'device'}`}
+   235→              className="w-full object-contain"
+   236→            />
+   237→          ) : (
+   238→            <div className="terminal-glass flex h-72 w-full flex-col items-center justify-center gap-3">
+   239→              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+   240→              <p className="text-sm text-muted-foreground">Waiting for first frame…</p>
+   241→            </div>
+   242→          )}
+   243→        </div>
+   244→
+   245→        <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+   246→          <div className="flex flex-wrap items-center gap-2">
+   247→            <Badge variant="outline" className="border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400">
+   248→              LIVE
+   249→            </Badge>
+   250→            <Badge variant="secondary" className="font-mono text-[10px]">{fps} fps</Badge>
+   251→            <Badge variant="secondary" className="font-mono text-[10px]">
+   252→              frame #{frame?.seq ?? 0}
+   253→            </Badge>
+   254→            <Badge variant="secondary" className="font-mono text-[10px]">1600×900</Badge>
+   255→          </div>
+   256→          <div className="flex items-center gap-3">
+   257→            <span className="font-mono">{fmtElapsed(now - startedAt.current)} elapsed</span>
+   258→            <Button
+   259→              size="sm"
+   260→              variant="destructive"
+   261→              className="h-9"
+   262→              disabled={stop.isPending}
+   263→              onClick={() => handleClose(false)}
+   264→            >
+   265→              <Square className="h-3.5 w-3.5" /> Stop stream
+   266→            </Button>
+   267→          </div>
+   268→        </div>
+   269→      </DialogContent>
+   270→    </Dialog>
+   271→  )
+   272→}
+   273→
+   274→// ─────────────────────────── view ───────────────────────────────────
+   275→
+   276→export default function MediaView() {
+   277→  const qc = useQueryClient()
+   278→  const selectedDeviceId = useDash((s) => s.selectedDeviceId)
+   279→  const setSelectedDeviceId = useDash((s) => s.setSelectedDeviceId)
+   280→  const { data: devices } = useDevices()
+   281→
+   282→  const device = useMemo(
+   283→    () => (devices ?? []).find((d) => d.id === selectedDeviceId) ?? null,
+   284→    [devices, selectedDeviceId]
+   285→  )
+   286→
+   287→  // settings → encryption banner + default stream quality
+   288→  const { data: settings } = useQuery({
+   289→    queryKey: ['settings'],
+   290→    queryFn: () => api<AppSettings>('/api/settings'),
+   291→    staleTime: 60_000,
+   292→  })
+   293→
+   294→  const [kind, setKind] = useState<MediaKind>('screen_record')
+   295→  const [quality, setQuality] = useState<string | null>(null)
+   296→  const [durationSec, setDurationSec] = useState('60')
+   297→  const [withMic, setWithMic] = useState(false)
+   298→  const [preview, setPreview] = useState<MediaAsset | null>(null)
+   299→  const [liveOpen, setLiveOpen] = useState(false)
+   300→  const [now, setNow] = useState(() => Date.now())
+   301→
+   302→  const effectiveQuality = quality ?? settings?.defaultStreamQuality ?? '720p'
+   303→  const hasPassword = Boolean(settings?.capturePassword)
+   304→
+   305→  // 1s ticker for "elapsed" on active captures
+   306→  useEffect(() => {
+   307→    const t = setInterval(() => setNow(Date.now()), 1000)
+   308→    return () => clearInterval(t)
+   309→  }, [])
+   310→
+   311→  const mediaQuery = useQuery({
+   312→    queryKey: ['media', selectedDeviceId],
+   313→    queryFn: () =>
+   314→      api<MediaAsset[]>(`/api/media?deviceId=${encodeURIComponent(String(selectedDeviceId))}&limit=60`),
+   315→    enabled: !!selectedDeviceId,
+   316→    refetchInterval: 8000,
+   317→  })
+   318→
+   319→  const invalidate = () => qc.invalidateQueries({ queryKey: ['media'] })
+   320→
+   321→  const screenshot = useMutation({
+   322→    mutationFn: () =>
+   323→      api<MediaAsset>('/api/media/screenshot', {
+   324→        method: 'POST',
+   325→        body: JSON.stringify({ deviceId: selectedDeviceId }),
+   326→      }),
+   327→    onSuccess: (asset) => {
+   328→      invalidate()
+   329→      toast.success(`Screenshot captured on ${device?.hostname ?? 'device'}`, {
+   330→        description: 'Encrypted, in-memory — opening preview',
+   331→      })
+   332→      if (asset.dataRef) setPreview(asset)
+   333→    },
+   334→    onError: (e) =>
+   335→      toast.error('Screenshot failed', {
+   336→        description: e instanceof Error ? e.message : 'Unknown error',
+   337→      }),
+   338→  })
+   339→
+   340→  const startRecord = useMutation({
+   341→    mutationFn: () =>
+   342→      api<MediaAsset>('/api/media', {
+   343→        method: 'POST',
+   344→        body: JSON.stringify({
+   345→          deviceId: selectedDeviceId,
+   346→          kind,
+   347→          quality: effectiveQuality,
+   348→          durationSec: Number(durationSec),
+   349→          withMic: kind === 'screen_record' ? withMic : false,
+   350→        }),
+   351→      }),
+   352→    onSuccess: () => {
+   353→      invalidate()
+   354→      toast.success(`Capture started on ${device?.hostname ?? 'device'}`, {
+   355→        description: `${KIND_META[kind].label} • ${effectiveQuality} • ${
+   356→          Number(durationSec) === 0 ? 'indefinite' : `${durationSec}s`
+   357→        }`,
+   358→      })
+   359→    },
+   360→    onError: (e) =>
+   361→      toast.error('Failed to start capture', {
+   362→        description: e instanceof Error ? e.message : 'Unknown error',
+   363→      }),
+   364→  })
+   365→
+   366→  const stopCapture = useMutation({
+   367→    mutationFn: (assetId: string) =>
+   368→      api<MediaAsset>('/api/media/stop', {
+   369→        method: 'POST',
+   370→        body: JSON.stringify({ assetId }),
+   371→      }),
+   372→    onSuccess: () => {
+   373→      invalidate()
+   374→      toast.success('Stop signal sent — capture is wrapping up')
+   375→    },
+   376→    onError: (e) =>
+   377→      toast.error('Failed to stop capture', {
+   378→        description: e instanceof Error ? e.message : 'Unknown error',
+   379→      }),
+   380→  })
+   381→
+   382→  const startLive = useMutation({
+   383→    mutationFn: () =>
+   384→      api<{ ok: true }>('/api/media/live', {
+   385→        method: 'POST',
+   386→        body: JSON.stringify({ deviceId: selectedDeviceId, action: 'start' }),
+   387→      }),
+   388→    onSuccess: () => {
+   389→      toast.success(`Live view started on ${device?.hostname ?? 'device'}`, {
+   390→        description: 'Streaming over the agent socket — stream-only, not persisted',
+   391→      })
+   392→      setLiveOpen(true)
+   393→    },
+   394→    onError: (e) =>
+   395→      toast.error('Live view failed', {
+   396→        description: e instanceof Error ? e.message : 'Unknown error',
+   397→      }),
+   398→  })
+   399→
+   400→  const removeAsset = useMutation({
+   401→    mutationFn: (id: string) => api<{ ok: true }>(`/api/media/${id}`, { method: 'DELETE' }),
+   402→    onSuccess: () => {
+   403→      invalidate()
+   404→      toast.success('Asset deleted')
+   405→    },
+   406→    onError: (e) =>
+   407→      toast.error('Failed to delete asset', {
+   408→        description: e instanceof Error ? e.message : 'Unknown error',
+   409→      }),
+   410→  })
+   411→
+   412→  const assets = mediaQuery.data ?? []
+   413→  const activeCaptures = assets.filter((a) => ACTIVE_STATUSES.includes(a.status))
+   414→
+   415→  // ── no device selected ──────────────────────────────────────────
+   416→  if (!selectedDeviceId) {
+   417→    return (
+   418→      <div className="flex flex-col gap-4">
+   419→        <SectionHeader
+   420→          title="Media capture"
+   421→          subtitle="Screenshots, screen recording, microphone & camera — encrypted, in-memory"
+   422→          icon={<Clapperboard className="h-5 w-5" />}
+   423→        />
+   424→        <EmptyState
+   425→          icon={<Clapperboard className="h-10 w-10" />}
+   426→          title="No device selected"
+   427→          hint="Pick a device below to open the capture studio."
+   428→        />
+   429→        <div className="mx-auto w-full max-w-sm">
+   430→          <DeviceSelector value={selectedDeviceId} onChange={setSelectedDeviceId} />
+   431→        </div>
+   432→      </div>
+   433→    )
+   434→  }
+   435→
+   436→  return (
+   437→    <div className="flex flex-col gap-4">
+   438→      <SectionHeader
+   439→        title="Media capture"
+   440→        subtitle="Screenshots, screen recording, microphone & camera — encrypted, in-memory"
+   441→        icon={<Clapperboard className="h-5 w-5" />}
+   442→      />
+   443→
+   444→      {/* encryption banner */}
+   445→      <div
+   446→        className={cn(
+   447→          'glass-inset flex flex-wrap items-center gap-3 rounded-2xl px-4 py-3',
+   448→          !hasPassword && 'border-amber-500/30'
+   449→        )}
+   450→      >
+   451→        <Lock className={cn('h-4 w-4 shrink-0', hasPassword ? 'text-primary' : 'text-amber-500')} />
+   452→        <p className="min-w-0 flex-1 text-sm text-muted-foreground">
+   453→          {hasPassword
+   454→            ? 'Artifacts are encrypted with your dashboard-set password (AES-256-GCM).'
+   455→            : 'No capture password set — configure one in Settings for at-rest encryption.'}
+   456→        </p>
+   457→        <div className="flex flex-wrap items-center gap-2">
+   458→          <Badge variant="outline" className="border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400">
+   459→            <Zap className="h-3 w-3" /> in-memory execution
+   460→          </Badge>
+   461→          <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+   462→            <ShieldCheck className="h-3 w-3" /> encrypted at rest
+   463→          </Badge>
+   464→        </div>
+   465→      </div>
+   466→
+   467→      {/* capture console */}
+   468→      <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+   469→        <Panel className="card-sheen glass-hover p-6">
+   470→          <div className="flex flex-col gap-5">
+   471→            <div>
+   472→              <h3 className="font-semibold">Capture console</h3>
+   473→              <p className="text-sm text-muted-foreground">
+   474→                Target: <span className="font-medium text-foreground">{device?.hostname}</span>
+   475→                {device?.friendlyName ? (
+   476→                  <span className="text-muted-foreground"> • {device.friendlyName}</span>
+   477→                ) : null}
+   478→              </p>
+   479→            </div>
+   480→
+   481→            <div className="flex flex-col gap-2 sm:flex-row">
+   482→              <Button
+   483→                size="lg"
+   484→                className="h-11 flex-1 sm:flex-none sm:px-8"
+   485→                disabled={screenshot.isPending}
+   486→                onClick={() => screenshot.mutate()}
+   487→              >
+   488→                <Camera className="h-5 w-5" />
+   489→                {screenshot.isPending ? 'Capturing…' : 'Take screenshot'}
+   490→              </Button>
+   491→              <Button
+   492→                size="lg"
+   493→                variant="outline"
+   494→                className="h-11 flex-1 border-primary/40 sm:flex-none sm:px-6"
+   495→                disabled={startLive.isPending || device?.status !== 'online'}
+   496→                onClick={() => startLive.mutate()}
+   497→              >
+   498→                {startLive.isPending ? (
+   499→                  <Loader2 className="h-5 w-5 animate-spin" />
+   500→                ) : (
+   501→                  <MonitorPlay className="h-5 w-5" />
+   502→                )}
+   503→                {startLive.isPending ? 'Connecting…' : 'Live view'}
+   504→              </Button>
+   505→            </div>
+   506→
+   507→            <div className="h-px bg-border/60" role="separator" />
+   508→
+   509→            {/* recording config */}
+   510→            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+   511→              <div className="flex flex-col gap-2">
+   512→                <Label className="text-xs uppercase tracking-wide text-muted-foreground">Kind</Label>
+   513→                <Select value={kind} onValueChange={(v) => setKind(v as MediaKind)}>
+   514→                  <SelectTrigger className="w-full" aria-label="Capture kind">
+   515→                    <SelectValue />
+   516→                  </SelectTrigger>
+   517→                  <SelectContent className="glass-strong">
+   518→                    <SelectItem value="screen_record">Screen recording</SelectItem>
+   519→                    <SelectItem value="mic_record">Microphone only</SelectItem>
+   520→                    <SelectItem value="camera_stream">Camera stream</SelectItem>
+   521→                    <SelectItem value="call">Video call (screen+cam+mic)</SelectItem>
+   522→                  </SelectContent>
+   523→                </Select>
+   524→              </div>
+   525→
+   526→              <div className="flex flex-col gap-2">
+   527→                <Label className="text-xs uppercase tracking-wide text-muted-foreground">Quality</Label>
+   528→                <Select value={effectiveQuality} onValueChange={(v) => setQuality(v)}>
+   529→                  <SelectTrigger className="w-full" aria-label="Stream quality">
+   530→                    <SelectValue />
+   531→                  </SelectTrigger>
+   532→                  <SelectContent className="glass-strong">
+   533→                    <SelectItem value="480p">480p</SelectItem>
+   534→                    <SelectItem value="720p">720p</SelectItem>
+   535→                    <SelectItem value="1080p">1080p</SelectItem>
+   536→                    <SelectItem value="source">Source</SelectItem>
+   537→                  </SelectContent>
+   538→                </Select>
+   539→              </div>
+   540→
+   541→              <div className="flex flex-col gap-2">
+   542→                <Label className="text-xs uppercase tracking-wide text-muted-foreground">Duration</Label>
+   543→                <Select value={durationSec} onValueChange={setDurationSec}>
+   544→                  <SelectTrigger className="w-full" aria-label="Capture duration">
+   545→                    <SelectValue />
+   546→                  </SelectTrigger>
+   547→                  <SelectContent className="glass-strong">
+   548→                    <SelectItem value="30">30 sec</SelectItem>
+   549→                    <SelectItem value="60">1 min</SelectItem>
+   550→                    <SelectItem value="300">5 min</SelectItem>
+   551→                    <SelectItem value="0">Indefinite</SelectItem>
+   552→                  </SelectContent>
+   553→                </Select>
+   554→              </div>
+   555→
+   556→              <div className="flex flex-col justify-end gap-2">
+   557→                {kind === 'screen_record' ? (
+   558→                  <div className="glass-inset flex min-h-11 items-center justify-between gap-3 rounded-xl px-3">
+   559→                    <Label htmlFor="with-mic" className="cursor-pointer text-sm">
+   560→                      Include microphone
+   561→                    </Label>
+   562→                    <Switch id="with-mic" checked={withMic} onCheckedChange={setWithMic} />
+   563→                  </div>
+   564→                ) : null}
+   565→                <Button
+   566→                  className="h-11 w-full"
+   567→                  disabled={startRecord.isPending}
+   568→                  onClick={() => startRecord.mutate()}
+   569→                >
+   570→                  {kind === 'mic_record' ? <Mic className="h-4 w-4" /> : <Video className="h-4 w-4" />}
+   571→                  {startRecord.isPending ? 'Starting…' : 'Start recording'}
+   572→                </Button>
+   573→              </div>
+   574→            </div>
+   575→          </div>
+   576→        </Panel>
+   577→
+   578→        {/* active captures */}
+   579→        <Panel className="glass-hover p-4">
+   580→          <div className="flex items-center justify-between gap-2">
+   581→            <h3 className="font-semibold">Active captures</h3>
+   582→            {activeCaptures.length > 0 ? (
+   583→              <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400">
+   584→                {activeCaptures.length} running
+   585→              </Badge>
+   586→            ) : null}
+   587→          </div>
+   588→          <div className="mt-3 flex flex-col gap-2">
+   589→            {activeCaptures.length === 0 ? (
+   590→              <p className="glass-inset rounded-xl px-3 py-6 text-center text-sm text-muted-foreground">
+   591→                No active captures
+   592→              </p>
+   593→            ) : (
+   594→              activeCaptures.map((a) => {
+   595→                const meta = KIND_META[a.kind] ?? KIND_META.screenshot
+   596→                return (
+   597→                  <div
+   598→                    key={a.id}
+   599→                    className="glass-inset glass-hover flex items-center gap-3 rounded-xl px-3 py-2.5"
+   600→                  >
+   601→                    <span className="relative flex h-2.5 w-2.5 shrink-0">
+   602→                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-60" />
+   603→                      <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-500" />
+   604→                    </span>
+   605→                    <div className="min-w-0 flex-1">
+   606→                      <p className="truncate text-sm font-medium">{meta.label}</p>
+   607→                      <p className="text-xs text-muted-foreground">
+   608→                        {fmtElapsed(now - new Date(a.createdAt).getTime())} elapsed
+   609→                      </p>
+   610→                    </div>
+   611→                    {a.quality ? (
+   612→                      <Badge variant="secondary" className="text-[10px]">
+   613→                        {a.quality}
+   614→                      </Badge>
+   615→                    ) : null}
+   616→                    <Button
+   617→                      size="icon"
+   618→                      variant="outline"
+   619→                      className="h-9 w-9 shrink-0"
+   620→                      aria-label="Stop capture"
+   621→                      disabled={stopCapture.isPending}
+   622→                      onClick={() => stopCapture.mutate(a.id)}
+   623→                    >
+   624→                      <Square className="h-3.5 w-3.5" />
+   625→                    </Button>
+   626→                  </div>
+   627→                )
+   628→              })
+   629→            )}
+   630→          </div>
+   631→        </Panel>
+   632→      </div>
+   633→
+   634→      {/* gallery */}
+   635→      <Panel className="glass-hover p-4 sm:p-6">
+   636→        <div className="flex items-center justify-between gap-2">
+   637→          <h3 className="font-semibold">Gallery</h3>
+   638→          {assets.length > 0 ? (
+   639→            <span className="text-xs text-muted-foreground">{assets.length} asset{assets.length === 1 ? '' : 's'}</span>
+   640→          ) : null}
+   641→        </div>
+   642→
+   643→        <div className="mt-3">
+   644→          {mediaQuery.isLoading ? (
+   645→            <LoadingBlock label="Loading media assets…" />
+   646→          ) : mediaQuery.isError ? (
+   647→            <ErrorBlock message={mediaQuery.error instanceof Error ? mediaQuery.error.message : 'Failed to load media'} />
+   648→          ) : assets.length === 0 ? (
+   649→            <EmptyState
+   650→              icon={<Clapperboard className="h-8 w-8" />}
+   651→              title="No media assets yet"
+   652→              hint="Take a screenshot or start a recording to populate the gallery."
+   653→            />
+   654→          ) : (
+   655→            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+   656→              {assets.map((a) => {
+   657→                const meta = KIND_META[a.kind] ?? KIND_META.screenshot
+   658→                const sb = statusBadge(a.status)
+   659→                const Icon = meta.icon
+   660→                const isRecord = a.kind !== 'screenshot'
+   661→                return (
+   662→                  <div key={a.id} className="glass-inset glass-hover flex flex-col gap-3 rounded-2xl p-3">
+   663→                    <div className="flex items-start justify-between gap-2">
+   664→                      <div className="flex min-w-0 items-center gap-2">
+   665→                        <div className="glass flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-primary">
+   666→                          <Icon className="h-4 w-4" />
+   667→                        </div>
+   668→                        <p className="truncate text-sm font-medium">{meta.label}</p>
+   669→                      </div>
+   670→                      <Badge variant="outline" className={cn('gap-1', sb.className)}>
+   671→                        {sb.pulse ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> : null}
+   672→                        {sb.label}
+   673→                      </Badge>
+   674→                    </div>
+   675→
+   676→                    {a.dataRef ? (
+   677→                      <img
+   678→                        src={a.dataRef}
+   679→                        alt={`${meta.label} preview`}
+   680→                        className="h-28 w-full rounded-xl object-cover ring-1 ring-border/50"
+   681→                        loading="lazy"
+   682→                      />
+   683→                    ) : (
+   684→                      <div className="glass flex h-28 w-full items-center justify-center rounded-xl text-xs text-muted-foreground">
+   685→                        no preview data
+   686→                      </div>
+   687→                    )}
+   688→
+   689→                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+   690→                      {a.quality ? <Badge variant="secondary" className="text-[10px]">{a.quality}</Badge> : null}
+   691→                      <span>{fmtDurationLabel(a.durationSec)}</span>
+   692→                      <span aria-hidden>•</span>
+   693→                      <span>{fmtBytes(a.sizeBytes)}</span>
+   694→                      <span aria-hidden>•</span>
+   695→                      <span title={fmtDate(a.createdAt)}>{timeAgo(a.createdAt)}</span>
+   696→                    </div>
+   697→
+   698→                    {a.encrypted ? (
+   699→                      <div className="flex flex-wrap items-center gap-1.5">
+   700→                        <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-400">
+   701→                          <ShieldCheck className="h-3 w-3" /> encrypted
+   702→                        </Badge>
+   703→                        {a.inMemory ? (
+   704→                          <Badge variant="outline" className="border-teal-500/30 bg-teal-500/10 text-[10px] text-teal-600 dark:text-teal-400">
+   705→                            <Zap className="h-3 w-3" /> in-memory
+   706→                          </Badge>
+   707→                        ) : null}
+   708→                      </div>
+   709→                    ) : null}
+   710→
+   711→                    <div className="mt-auto flex items-center gap-2">
+   712→                      <Button
+   713→                        size="sm"
+   714→                        variant="outline"
+   715→                        className="h-9 flex-1"
+   716→                        disabled={!a.dataRef}
+   717→                        onClick={() => setPreview(a)}
+   718→                      >
+   719→                        <Eye className="h-3.5 w-3.5" /> Preview
+   720→                      </Button>
+   721→                      {a.dataRef ? (
+   722→                        <a
+   723→                          href={a.dataRef}
+   724→                          download={`sentra-${a.kind}-${a.id.slice(0, 8)}`}
+   725→                          className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-md border bg-background px-3 text-sm font-medium shadow-xs transition-colors hover:bg-accent hover:text-accent-foreground"
+   726→                          aria-label="Download asset"
+   727→                        >
+   728→                          <Download className="h-3.5 w-3.5" /> Download
+   729→                        </a>
+   730→                      ) : (
+   731→                        <Button size="sm" variant="outline" className="h-9 flex-1" disabled>
+   732→                          <Download className="h-3.5 w-3.5" /> Download
+   733→                        </Button>
+   734→                      )}
+   735→                      <AlertDialog>
+   736→                        <AlertDialogTrigger asChild>
+   737→                          <Button
+   738→                            size="icon"
+   739→                            variant="outline"
+   740→                            className="h-9 w-9 shrink-0 border-rose-500/30 text-rose-500 hover:bg-rose-500/10 hover:text-rose-600"
+   741→                            aria-label="Delete asset"
+   742→                          >
+   743→                            <Trash2 className="h-3.5 w-3.5" />
+   744→                          </Button>
+   745→                        </AlertDialogTrigger>
+   746→                        <AlertDialogContent className="glass-strong">
+   747→                          <AlertDialogHeader>
+   748→                            <AlertDialogTitle>Delete this asset?</AlertDialogTitle>
+   749→                            <AlertDialogDescription>
+   750→                              {meta.label} from {timeAgo(a.createdAt)} will be permanently removed from
+   751→                              the device vault. This cannot be undone.
+   752→                            </AlertDialogDescription>
+   753→                          </AlertDialogHeader>
+   754→                          <AlertDialogFooter>
+   755→                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+   756→                            <AlertDialogAction
+   757→                              className="bg-destructive text-white hover:bg-destructive/90"
+   758→                              onClick={() => removeAsset.mutate(a.id)}
+   759→                            >
+   760→                              Delete
+   761→                            </AlertDialogAction>
+   762→                          </AlertDialogFooter>
+   763→                        </AlertDialogContent>
+   764→                      </AlertDialog>
+   765→                    </div>
+   766→                  </div>
+   767→                )
+   768→              })}
+   769→            </div>
+   770→          )}
+   771→        </div>
+   772→      </Panel>
+   773→
+   774→      {/* live screen viewer */}
+   775→      <LiveViewDialog device={device} open={liveOpen} onOpenChange={setLiveOpen} now={now} />
+   776→
+   777→      {/* preview dialog */}
+   778→      <Dialog open={!!preview} onOpenChange={(open) => !open && setPreview(null)}>
+   779→        <DialogContent className="glass-strong sm:max-w-2xl">
+   780→          <DialogHeader>
+   781→            <DialogTitle>
+   782→              {preview ? (KIND_META[preview.kind] ?? KIND_META.screenshot).label : 'Preview'}
+   783→            </DialogTitle>
+   784→            <DialogDescription>
+   785→              {preview
+   786→                ? `${preview.quality ?? 'source'} • ${fmtBytes(preview.sizeBytes)} • ${timeAgo(preview.createdAt)}`
+   787→                : null}
+   788→            </DialogDescription>
+   789→          </DialogHeader>
+   790→          {preview?.dataRef ? (
+   791→            <div className="flex flex-col gap-2">
+   792→              <img
+   793→                src={preview.dataRef}
+   794→                alt={`${preview.kind} preview`}
+   795→                className="w-full rounded-xl ring-1 ring-border/50"
+   796→              />
+   797→              {preview.kind !== 'screenshot' ? (
+   798→                <p className="text-center text-xs text-muted-foreground">
+   799→                  video preview not available in demo — showing poster frame
+   800→                </p>
+   801→              ) : null}
+   802→            </div>
+   803→          ) : (
+   804→            <p className="py-6 text-center text-sm text-muted-foreground">No preview data available.</p>
+   805→          )}
+   806→        </DialogContent>
+   807→      </Dialog>
+   808→    </div>
+   809→  )
+   810→}
+   811→

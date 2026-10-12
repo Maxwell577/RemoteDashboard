@@ -1,0 +1,762 @@
+     1→// ═══════════════════════════════════════════════════════════════════
+     2→// SentraRMM — Shared types & API contract
+     3→// This file is the single source of truth for frontend + backend.
+     4→// Backend (src/app/api/**) implements these routes.
+     5→// Frontend (src/components/dashboard/**) consumes them.
+     6→// Realtime hub (mini-services/agent-hub) implements the socket events.
+     7→// ═══════════════════════════════════════════════════════════════════
+     8→
+     9→// ─────────────────────────── Core entities ─────────────────────────
+    10→
+    11→export type DeviceStatus = "online" | "offline";
+    12→export type DeviceType = "workstation" | "laptop" | "server";
+    13→
+    14→export interface Device {
+    15→  id: string;
+    16→  agentId: string;
+    17→  hostname: string;
+    18→  friendlyName: string | null;
+    19→  osName: string;
+    20→  osVersion: string;
+    21→  osArch: string;
+    22→  platform: string;
+    23→  cpuModel: string | null;
+    24→  cpuCores: number;
+    25→  totalMemoryMB: number;
+    26→  ipAddress: string | null;
+    27→  localIp: string | null;
+    28→  macAddress: string | null;
+    29→  agentVersion: string | null;
+    30→  deviceType: DeviceType;
+    31→  tags: string[]; // parsed from JSON
+    32→  status: DeviceStatus;
+    33→  lastSeen: string | null; // ISO
+    34→  firstSeen: string;
+    35→  locationLat: number | null;
+    36→  locationLon: number | null;
+    37→  locationLabel: string | null;
+    38→  notes: string | null;
+    39→  /** maintenance window — new alerts for this device are suppressed server-side */
+    40→  maintenance: boolean;
+    41→  /** enumerated capture sources (monitors/cameras/mics/shells) reported at agent:register; null = legacy agent */
+    42→  captures: CaptureCapabilities | null;
+    43→}
+    44→
+    45→export type CommandStatus =
+    46→  | "pending"
+    47→  | "running"
+    48→  | "completed"
+    49→  | "failed"
+    50→  | "timeout";
+    51→
+    52→export interface CommandExecution {
+    53→  id: string;
+    54→  deviceId: string;
+    55→  command: string;
+    56→  output: string | null;
+    57→  status: CommandStatus;
+    58→  exitCode: number | null;
+    59→  durationMs: number | null;
+    60→  shell: string;
+    61→  createdBy: string;
+    62→  createdAt: string;
+    63→  completedAt: string | null;
+    64→}
+    65→
+    66→export type MediaKind =
+    67→  | "screenshot"
+    68→  | "screen_record"
+    69→  | "mic_record"
+    70→  | "camera_stream"
+    71→  | "call";
+    72→export type MediaStatus =
+    73→  | "requested"
+    74→  | "capturing"
+    75→  | "processing"
+    76→  | "available"
+    77→  | "failed"
+    78→  | "stopped";
+    79→
+    80→export interface MediaAsset {
+    81→  id: string;
+    82→  deviceId: string;
+    83→  kind: MediaKind;
+    84→  status: MediaStatus;
+    85→  format: string | null;
+    86→  quality: string | null; // 480p | 720p | 1080p | source
+    87→  withMic: boolean;
+    88→  durationSec: number | null; // null/0 = indefinite
+    89→  sizeBytes: number | null;
+    90→  encrypted: boolean;
+    91→  encryptionNote: string | null;
+    92→  inMemory: boolean;
+    93→  dataRef: string | null; // data-URI / object URL for preview
+    94→  error: string | null;
+    95→  createdAt: string;
+    96→  completedAt: string | null;
+    97→}
+    98→
+    99→export type CaptureStatus = "running" | "stopped" | "failed";
+   100→
+   101→export interface NetworkCapture {
+   102→  id: string;
+   103→  deviceId: string;
+   104→  status: CaptureStatus;
+   105→  iface: string;
+   106→  filterBpf: string | null;
+   107→  tool: string;
+   108→  packets: number;
+   109→  bytesCaptured: number;
+   110→  outputPath: string | null;
+   111→  encrypted: boolean;
+   112→  notes: string | null;
+   113→  startedAt: string;
+   114→  stoppedAt: string | null;
+   115→}
+   116→
+   117→export interface LocationPing {
+   118→  id: string;
+   119→  deviceId: string;
+   120→  lat: number;
+   121→  lon: number;
+   122→  accuracyM: number | null;
+   123→  label: string | null;
+   124→  source: "ip" | "gps" | "wifi";
+   125→  createdAt: string;
+   126→}
+   127→
+   128→export type FileOpKind =
+   129→  | "list"
+   130→  | "download"
+   131→  | "upload"
+   132→  | "delete"
+   133→  | "rename"
+   134→  | "modify"
+   135→  | "mkdir";
+   136→
+   137→export interface FileOperation {
+   138→  id: string;
+   139→  deviceId: string;
+   140→  op: FileOpKind;
+   141→  path: string;
+   142→  details: string | null;
+   143→  status: "ok" | "failed";
+   144→  sizeBytes: number | null;
+   145→  createdAt: string;
+   146→}
+   147→
+   148→export interface ProcessSnapshot {
+   149→  id: string;
+   150→  deviceId: string;
+   151→  data: string; // JSON: ProcessInfo[]
+   152→  procCount: number;
+   153→  capturedAt: string;
+   154→}
+   155→
+   156→export interface Alert {
+   157→  id: string;
+   158→  deviceId: string | null;
+   159→  title: string;
+   160→  message: string;
+   161→  severity: "info" | "warning" | "critical";
+   162→  acknowledged: boolean;
+   163→  ackedBy: string | null;
+   164→  acknowledgedAt: string | null;
+   165→  createdAt: string;
+   166→}
+   167→
+   168→export interface AuditLog {
+   169→  id: string;
+   170→  deviceId: string | null;
+   171→  actor: string;
+   172→  action: string;
+   173→  detail: string | null;
+   174→  severity: "info" | "warning" | "critical";
+   175→  createdAt: string;
+   176→}
+   177→
+   178→export interface SavedCommand {
+   179→  id: string;
+   180→  name: string;
+   181→  command: string;
+   182→  description: string | null;
+   183→  category: string;
+   184→  createdAt: string;
+   185→}
+   186→
+   187→// ─────────────────────────── File browser ──────────────────────────
+   188→
+   189→export interface FsEntry {
+   190→  name: string;
+   191→  path: string;
+   192→  type: "file" | "directory";
+   193→  sizeBytes: number;
+   194→  modifiedAt: string;
+   195→  hidden: boolean;
+   196→  ext?: string;
+   197→}
+   198→
+   199→export interface FsListing {
+   200→  path: string;
+   201→  parent: string | null;
+   202→  drives: string[];
+   203→  entries: FsEntry[];
+   204→}
+   205→
+   206→export interface FsDownload {
+   207→  path: string;
+   208→  name: string;
+   209→  sizeBytes: number;
+   210→  contentBase64: string;
+   211→  encryptedNote?: string;
+   212→}
+   213→
+   214→// ─────────────────────────── Process info ──────────────────────────
+   215→
+   216→export interface ProcessInfo {
+   217→  pid: number;
+   218→  name: string;
+   219→  cpuPercent: number;
+   220→  memoryMB: number;
+   221→  status: "running" | "suspended" | "stopped";
+   222→  user: string;
+   223→  path: string;
+   224→}
+   225→
+   226→// ─────────────────────────── Live metrics ──────────────────────────
+   227→
+   228→export interface DeviceMetrics {
+   229→  deviceId: string;
+   230→  cpuPercent: number;
+   231→  memoryPercent: number;
+   232→  diskPercent: number;
+   233→  uptimeSec: number;
+   234→  activeUsers: number;
+   235→  netUpKBps: number;
+   236→  netDownKBps: number;
+   237→  capturedAt: string;
+   238→}
+   239→
+   240→// ─────────────────────── Telemetry history charts ──────────────────
+   241→
+   242→/** One sampled utilization point (device heartbeat), ascending by time. */
+   243→export interface TelemetryPoint {
+   244→  t: number; // epoch ms
+   245→  cpu: number;
+   246→  memory: number;
+   247→  disk: number;
+   248→}
+   249→
+   250→export interface TelemetryDeviceSeries {
+   251→  deviceId: string;
+   252→  minutes: number;
+   253→  points: TelemetryPoint[];
+   254→}
+   255→
+   256→export interface TelemetryAllSeries {
+   257→  minutes: number;
+   258→  /** keyed by Device.id */
+   259→  series: Record<string, TelemetryPoint[]>;
+   260→}
+   261→
+   262→// ─────────────────────────── Dashboard stats ───────────────────────
+   263→
+   264→export interface DashboardStats {
+   265→  totalDevices: number;
+   266→  onlineDevices: number;
+   267→  offlineDevices: number;
+   268→  commandsToday: number;
+   269→  activeCaptures: number;
+   270→  runningNetCaptures: number;
+   271→  unackAlerts: number;
+   272→  criticalAlerts: number;
+   273→  mediaAssets: number;
+   274→  auditEvents: number;
+   275→}
+   276→
+   277→// ─────────────────────── Device activity timeline ───────────────────
+   278→
+   279→/** One merged entry of GET /api/devices/[id]/activity (reverse-chronological feed). */
+   280→export interface DeviceActivityEntry {
+   281→  id: string;
+   282→  type: "command" | "file" | "media" | "network" | "location" | "alert";
+   283→  title: string;
+   284→  detail?: string;
+   285→  status: string;
+   286→  severity: "info" | "warning" | "critical";
+   287→  at: string; // ISO timestamp
+   288→}
+   289→
+   290→
+   291→// ───────────────────────── Device health score ──────────────────────
+   292→
+   293→/**
+   294→ * Composite 0-100 health score from live telemetry (frontend-computed).
+   295→ * 100 = idle healthy machine; deductions for CPU/MEM/DISK pressure + penalties
+   296→ * for stale telemetry or offline status.
+   297→ */
+   298→export function computeHealthScore(input: {
+   299→  online: boolean;
+   300→  cpuPercent?: number | null;
+   301→  memoryPercent?: number | null;
+   302→  diskPercent?: number | null;
+   303→  stale?: boolean;
+   304→}): number {
+   305→  if (!input.online) return 40;
+   306→  let score = 100;
+   307→  const cpu = input.cpuPercent ?? 0;
+   308→  const mem = input.memoryPercent ?? 0;
+   309→  const disk = input.diskPercent ?? 0;
+   310→  score -= Math.max(0, cpu - 30) * 0.5; // heavy CPU load hurts most
+   311→  score -= Math.max(0, mem - 55) * 0.6; // memory pressure is critical
+   312→  score -= Math.max(0, disk - 80) * 0.8; // nearly-full disks are a risk
+   313→  if (input.stale) score -= 10;
+   314→  return Math.max(0, Math.min(100, Math.round(score)));
+   315→}
+   316→
+   317→// ─────────────────────────── Alert rules engine ────────────────────
+   318→
+   319→export type AlertMetric = "cpu" | "memory" | "disk";
+   320→export type AlertRuleOp = "gt" | "lt";
+   321→
+   322→/**
+   323→ * A threshold rule evaluated against every device heartbeat. Rules live in
+   324→ * the Setting table under key "alertRules" (JSON array). When a device's
+   325→ * telemetry crosses the threshold, an Alert row is created — rate-limited by
+   326→ * `cooldownMin` per device+rule and suppressed while maintenance is open.
+   327→ */
+   328→export interface AlertRule {
+   329→  id: string;
+   330→  name: string; // "High CPU load" — used in the alert title
+   331→  metric: AlertMetric;
+   332→  op: AlertRuleOp; // gt = above, lt = below
+   333→  threshold: number; // percent 0-100
+   334→  severity: "info" | "warning" | "critical";
+   335→  cooldownMin: number; // min minutes between repeat alerts for the same device
+   336→  enabled: boolean;
+   337→  /**
+   338→   * Optional tag scope — when set, the rule only evaluates against devices
+   339→   * whose tags include this value (e.g. "production"). null/undefined = all
+   340→   * devices.
+   341→   */
+   342→  deviceTag?: string | null;
+   343→}
+   344→
+   345→export const DEFAULT_ALERT_RULES: AlertRule[] = [
+   346→  {
+   347→    id: "rule-cpu-high",
+   348→    name: "High CPU load",
+   349→    metric: "cpu",
+   350→    op: "gt",
+   351→    threshold: 60,
+   352→    severity: "warning",
+   353→    cooldownMin: 15,
+   354→    enabled: true,
+   355→  },
+   356→  {
+   357→    id: "rule-mem-pressure",
+   358→    name: "Memory pressure",
+   359→    metric: "memory",
+   360→    op: "gt",
+   361→    threshold: 65,
+   362→    severity: "warning",
+   363→    cooldownMin: 15,
+   364→    enabled: true,
+   365→  },
+   366→  {
+   367→    id: "rule-disk-full",
+   368→    name: "Disk almost full",
+   369→    metric: "disk",
+   370→    op: "gt",
+   371→    threshold: 70,
+   372→    severity: "warning",
+   373→    cooldownMin: 60,
+   374→    enabled: true,
+   375→  },
+   376→];
+   377→
+   378→export const METRIC_LABELS: Record<AlertMetric, string> = {
+   379→  cpu: "CPU",
+   380→  memory: "Memory",
+   381→  disk: "Disk",
+   382→};
+   383→
+   384→/** Human-readable condition, e.g. "CPU above 60%". */
+   385→export function describeRule(r: Pick<AlertRule, "metric" | "op" | "threshold">): string {
+   386→  return `${METRIC_LABELS[r.metric]} ${r.op === "gt" ? "above" : "below"} ${r.threshold}%`;
+   387→}
+   388→
+   389→// ─────────────────────────── Settings blob ─────────────────────────
+   390→
+   391→export interface AppSettings {
+   392→  capturePassword: string; // password used to encrypt stored artifacts
+   393→  retentionDays: number;
+   394→  defaultStreamQuality: "480p" | "720p" | "1080p";
+   395→  heartbeatIntervalSec: number;
+   396→  alertsOnOffline: boolean;
+   397→  alertsOnNewDevice: boolean;
+   398→  /** master switch for the threshold rules engine (individual rules also have their own flag) */
+   399→  alertRulesEnabled: boolean;
+   400→  inMemoryModeDefault: boolean;
+   401→  supabaseUrl: string;
+   402→  supabaseBucket: string;
+   403→  hubUrl: string;
+   404→}
+   405→
+   406→export const DEFAULT_SETTINGS: AppSettings = {
+   407→  capturePassword: "",
+   408→  retentionDays: 30,
+   409→  defaultStreamQuality: "720p",
+   410→  heartbeatIntervalSec: 15,
+   411→  alertsOnOffline: true,
+   412→  alertsOnNewDevice: true,
+   413→  alertRulesEnabled: true,
+   414→  inMemoryModeDefault: true,
+   415→  supabaseUrl: "",
+   416→  supabaseBucket: "sentrarmm-artifacts",
+   417→  hubUrl: "http://127.0.0.1:3003",
+   418→};
+   419→
+   420→// ───────────────────────────── API routes ──────────────────────────
+   421→// All routes return JSON. Shape: { ok: true, data } or { ok: false, error }.
+   422→
+   423→export interface ApiOk<T> {
+   424→  ok: true;
+   425→  data: T;
+   426→}
+   427→export interface ApiErr {
+   428→  ok: false;
+   429→  error: string;
+   430→}
+   431→export type ApiResult<T> = ApiOk<T> | ApiErr;
+   432→
+   433→/**
+   434→ * GET  /api/devices                     → Device[]
+   435→ * GET  /api/devices/[agentId|id]        → Device
+   436→ * POST /api/devices/[id]/notes          body: { notes }             → Device
+   437→ *
+   438→ * GET  /api/stats                       → DashboardStats
+   439→ *
+   440→ * GET  /api/metrics/history?deviceId=&minutes=30 → TelemetryDeviceSeries
+   441→ * GET  /api/metrics/history?minutes=30           → TelemetryAllSeries
+   442→ *
+   443→ * GET  /api/commands?deviceId=&limit=   → CommandExecution[]
+   444→ * POST /api/commands                    body: { deviceId, command } → CommandExecution (pending)
+   445→ * GET  /api/commands/[id]               → CommandExecution (poll for result)
+   446→ *
+   447→ * GET  /api/files?deviceId=&path=C:\    → FsListing        (sync via hub dispatch)
+   448→ * POST /api/files/upload                body: { deviceId, path, name, contentBase64 } → { ok }
+   449→ * POST /api/files/delete                body: { deviceId, path }                      → { ok }
+   450→ * POST /api/files/rename                body: { deviceId, path, newName }             → { ok }
+   451→ * POST /api/files/mkdir                 body: { deviceId, path }                      → { ok }
+   452→ * GET  /api/files/download?deviceId=&path= → FsDownload
+   453→ * GET  /api/files/operations?deviceId=  → FileOperation[]
+   454→ *
+   455→ * GET  /api/processes?deviceId=         → { snapshot: ProcessSnapshot|null, processes: ProcessInfo[], metrics: DeviceMetrics }
+   456→ * POST /api/processes/action            body: { deviceId, pid, action: "kill"|"suspend"|"resume" } → { ok }
+   457→ *
+   458→ * GET  /api/media?deviceId=&limit=      → MediaAsset[]
+   459→ * POST /api/media/screenshot            body: { deviceId }           → MediaAsset (with dataRef, sync)
+   460→ * POST /api/media/record                body: { deviceId, kind, quality, durationSec, withMic } → MediaAsset (async)
+   461→ * POST /api/media/stop                  body: { assetId }            → MediaAsset
+   462→ * POST /api/media/live                  body: { deviceId, action: "start"|"stop" } → { ok, agentId } (frames via socket `screen:frame`)
+   463→ * DELETE /api/media/[id]                → { ok }
+   464→ *
+   465→ * GET  /api/network?deviceId=           → NetworkCapture[]
+   466→ * POST /api/network/start               body: { deviceId, iface, filterBpf } → NetworkCapture
+   467→ * POST /api/network/stop                body: { deviceId }           → NetworkCapture
+   468→ *
+   469→ * GET  /api/location?deviceId=          → { device, pings: LocationPing[] }
+   470→ * POST /api/location/ping               body: { deviceId }           → LocationPing (fresh fix, sync)
+   471→ *
+   472→ * GET  /api/alerts?unackOnly=1&limit=   → Alert[]
+   473→ * POST /api/alerts/[id]/ack             → Alert
+   474→ * POST /api/alerts/clear-acked          → { deleted: number }
+   475→ *
+   476→ * GET  /api/alert-rules                 → AlertRule[]
+   477→ * PUT  /api/alert-rules                 body: AlertRule[] → AlertRule[] (full replace, validated)
+   478→ * POST /api/alert-rules/evaluate        body: { entries: [{ deviceId, hostname, cpu, memory, disk }] } → { fired, results }
+   479→ *
+   480→ * POST /api/devices/bulk                body: { ids, action: "maintenance"|"addTag"|"removeTag", value } → { updated }
+   481→ *
+   482→ * GET  /api/audit?deviceId=&limit=      → AuditLog[]
+   483→ *
+   484→ * GET  /api/saved-commands              → SavedCommand[]
+   485→ * POST /api/saved-commands              body: { name, command, description?, category? } → SavedCommand
+   486→ * DELETE /api/saved-commands/[id]       → { ok }
+   487→ *
+   488→ * GET  /api/settings                    → AppSettings
+   489→ * PUT  /api/settings                    body: Partial<AppSettings>   → AppSettings
+   490→ *
+   491→ * GET  /api/hub/status                  → { online: boolean, agents: { agentId, hostname, connected, lastSeen }[] }
+   492→ *
+   493→ * Internal (hub → api, shared-secret header x-hub-token):
+   494→ * POST /api/internal/heartbeat          body: { agentId, metrics, status, location? } → { ok, fired: Alert[] } (fired = rule-engine alerts, relayed by the hub)
+   495→ * POST /api/internal/devices/register   body: device info            → Device
+   496→ * POST /api/internal/commands/result    body: { commandId, status, output, exitCode, durationMs } → { ok }
+   497→ * POST /api/internal/media/result       body: { assetId, status, dataRef?, sizeBytes?, error? }   → { ok }
+   498→ * POST /api/internal/network/stats      body: { captureId, packets, bytesCaptured }               → { ok }
+   499→ * POST /api/internal/alerts             body: { deviceId?, title, message, severity }             → Alert
+   500→ * POST /api/internal/location           body: { agentId, lat, lon, accuracyM?, label?, source }   → { ok }
+   501→ */
+   502→
+   503→// ───────────────────────── Socket.io contract ──────────────────────
+   504→// Hub runs on port 3003 (connect from browser: io("/?XTransformPort=3003", { path: "/" }))
+   505→//
+   506→// Client (dashboard) → hub:
+   507→//   "dashboard:join"            → joins "dashboard" room
+   508→// Hub → dashboard:
+   509→//   "device:update"   { device: Device }
+   510→//   "metrics:update"  { metrics: DeviceMetrics }
+   511→//   "command:result"  { command: CommandExecution }
+   512→//   "media:update"    { asset: MediaAsset }
+   513→//   "network:update"  { capture: NetworkCapture }
+   514→//   "alert:new"       { alert: Alert }
+   515→//   "screen:frame"    { agentId, dataUri, ts, seq, width, height }  (live screen viewer stream)
+   516→// Hub internal (agent ↔ hub):
+   517→//   "agent:register"  { info: AgentInfo }            ack → { ok }
+   518→//   "agent:heartbeat" { agentId, metrics, location? }
+   519→//   "agent:request"   { requestId, type, payload }   (hub → agent)
+   520→//   "agent:reply"     { requestId, ok, data?, error? } (agent → hub)
+   521→//
+   522→// agent request types handled by agents:
+   523→//   "exec"        { command }              → { output, exitCode, durationMs }
+   524→//   "fs:list"     { path }                 → FsListing
+   525→//   "fs:download" { path }                 → FsDownload
+   526→//   "fs:upload"   { path, name, contentBase64 } → { path }
+   527→//   "fs:delete"   { path }                 → { ok }
+   528→//   "fs:rename"   { path, newName }        → { path }
+   529→//   "fs:mkdir"    { path }                 → { path }
+   530→//   "ps:list"     {}                       → { processes: ProcessInfo[], metrics: DeviceMetrics }
+   531→//   "ps:action"   { pid, action }          → { ok }
+   532→//   "media:screenshot" { }                 → { dataUri, sizeBytes }
+   533→//   "media:record"     { assetId, kind, quality, durationSec, withMic } → ack { started } (async, results via HTTP)
+   534→//   "media:stop"       { assetId }          → { ok }
+   535→//   "net:start"   { captureId, iface, filterBpf } → ack { started } (stats via HTTP)
+   536→//   "net:stop"    { captureId }            → { packets, bytesCaptured }
+   537→//   "location:fix" {}                      → { lat, lon, accuracyM, label, source }
+   538→//   "screen:live:start" { fps }            → ack { started, fps } (frames via `screen:frame` until stop)
+   539→//   "screen:live:stop"  {}                 → { frames }
+   540→
+   541→// ───────────────────────── Live screen viewer ───────────────────────
+   542→
+   543→/** One pushed frame of the live screen viewer (socket event `screen:frame`). */
+   544→export interface ScreenFrame {
+   545→  agentId: string;
+   546→  dataUri: string;
+   547→  ts: number; // epoch ms at the agent
+   548→  seq: number; // monotonically increasing per stream
+   549→  width: number;
+   550→  height: number;
+   551→}
+   552→
+   553→// ─────────────────────────── Helper types ──────────────────────────
+   554→
+   555→export interface AgentInfo {
+   556→  agentId: string;
+   557→  hostname: string;
+   558→  friendlyName?: string;
+   559→  osName: string;
+   560→  osVersion: string;
+   561→  osArch: string;
+   562→  platform: string;
+   563→  cpuModel: string;
+   564→  cpuCores: number;
+   565→  totalMemoryMB: number;
+   566→  localIp: string;
+   567→  macAddress: string;
+   568→  agentVersion: string;
+   569→  deviceType: DeviceType;
+   570→  tags?: string[];
+   571→}
+   572→
+   573→export const HUB_PORT = 3003;
+   574→
+   575→// Client-side fetch helper contract (frontend should use this)
+   576→export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+   577→  const res = await fetch(path, {
+   578→    headers: { "Content-Type": "application/json" },
+   579→    ...init,
+   580→  });
+   581→  const json = (await res.json()) as ApiResult<T>;
+   582→  if (!json.ok) throw new Error(json.error || "Request failed");
+   583→  return json.data;
+   584→}
+   585→
+   586→// ═══════════════════════════════════════════════════════════════════
+   587→// v0.3 contract — multi-source streams, scheduled encrypted
+   588→// recordings, shell selection, capture capabilities
+   589→// ═══════════════════════════════════════════════════════════════════
+   590→
+   591→// ───────────────────── Shells & capture capabilities ───────────────
+   592→
+   593→/** Shells an agent can execute. "auto" = powershell first, cmd fallback. */
+   594→export type ShellKind = "powershell" | "cmd";
+   595→export type ExecShell = ShellKind | "auto";
+   596→
+   597→export interface MonitorSource {
+   598→  id: string; // agent-side stable id, e.g. "monitor:0"
+   599→  name: string; // "Display 1 (primary)"
+   600→  width: number;
+   601→  height: number;
+   602→  primary: boolean;
+   603→}
+   604→
+   605→export interface CameraSource {
+   606→  id: string; // e.g. "camera:0"
+   607→  name: string; // "Integrated Webcam"
+   608→}
+   609→
+   610→export interface MicSource {
+   611→  id: string; // e.g. "mic:default"
+   612→  name: string; // "Microphone Array"
+   613→}
+   614→
+   615→/**
+   616→ * Everything an agent can capture, enumerated at register time and
+   617→ * refreshable. Persisted on Device.captures (JSON) so the dashboard can
+   618→ * schedule/plan even while the device is offline.
+   619→ */
+   620→export interface CaptureCapabilities {
+   621→  monitors: MonitorSource[];
+   622→  cameras: CameraSource[];
+   623→  mics: MicSource[];
+   624→  shells: ShellKind[]; // supported shells; "auto" always allowed
+   625→  /** honest limitation notes shown in the UI, e.g. "camera enumeration needs the Python agent" */
+   626→  notes?: string[];
+   627→}
+   628→
+   629→// ─────────────────────── Multi-source live streams ─────────────────
+   630→// Generalizes the v0.2 single `screen:live` channel. Any number of
+   631→// streams may run simultaneously (e.g. screen + 2 cameras + mic).
+   632→
+   633→export type StreamKind = "screen" | "camera" | "mic";
+   634→
+   635→export interface StreamDescriptor {
+   636→  streamId: string; // dashboard-generated (cuid/uuid)
+   637→  kind: StreamKind;
+   638→  sourceId?: string | null; // monitor/camera/mic id; null = default
+   639→  fps?: number; // screen/camera target fps (cap 5 screen / 15 camera)
+   640→  quality?: "480p" | "720p" | "1080p" | "source";
+   641→}
+   642→
+   643→/** Socket event `stream:frame` (agent → hub → dashboard). */
+   644→export interface StreamFrame {
+   645→  agentId: string;
+   646→  streamId: string;
+   647→  kind: StreamKind;
+   648→  dataUri?: string; // image/jpeg data URI (screen/camera); absent for mic levels
+   649→  ts: number; // epoch ms at the agent
+   650→  seq: number; // monotonically increasing per stream
+   651→  width?: number;
+   652→  height?: number;
+   653→  /** mic streams only: input level 0..1 (RMS), ~8 Hz */
+   654→  level?: number;
+   655→}
+   656→
+   657→// Socket contract additions (hub on :3003, browser via io("/?XTransformPort=3003", { path: "/" })):
+   658→//
+   659→// Dashboard → hub (hub forwards to the agent as agent:request):
+   660→//   agent request "stream:start" { ...StreamDescriptor }        ack { started: true, meta?: { width, height, fps } } | ack error
+   661→//   agent request "stream:stop"  { streamId }                   → { frames: number }
+   662→// Dashboard → hub socket (frame routing is push-only, no ack):
+   663→//   "stream:stop"   { agentId, streamId }   (belt-and-braces stop for orphaned streams)
+   664→// Hub → dashboard:
+   665→//   "stream:frame"  StreamFrame
+   666→//   "stream:ended"  { agentId, streamId, frames, reason? }
+   667→//
+   668→// Agents MUST stop all streams of a device when the agent disconnects; the
+   669→// hub emits "stream:ended" for every active streamId of that agent.
+   670→
+   671→// ─────────────────── Scheduled encrypted recordings ────────────────
+   672→// Transparency requirement: the agent announces the schedule to the device
+   673→// user (notification) and shows a persistent on-screen indicator while
+   674→// recording. These behaviors are non-optional and cannot be disabled by
+   675→// config. Recording continues locally while the hub is unreachable.
+   676→
+   677→export type RecordingState =
+   678→  | "armed" // accepted by agent, waiting to start (or counting down)
+   679→  | "recording"
+   680→  | "completed" // file sealed + uploaded to hub
+   681→  | "failed"
+   682→  | "canceled";
+   683→
+   684→export interface RecordingArtifact {
+   685→  id: string; // DB id (cuid)
+   686→  recordingId: string; // agent-side id (dashboard-generated, shared)
+   687→  deviceId: string; // Device.id
+   688→  label: string | null;
+   689→  durationSec: number;
+   690→  /** selected sources, e.g. { monitors:["monitor:0"], cameras:["camera:0"], mics:["mic:default"] } */
+   691→  sources: { monitors?: string[]; cameras?: string[]; mics?: string[] } | null;
+   692→  state: RecordingState;
+   693→  fileName: string | null; // <recordingId>.enc
+   694→  sizeBytes: number | null;
+   695→  sha256: string | null; // integrity hash of the uploaded .enc file
+   696→  encryption: string; // "AES-256-GCM"
+   697→  kdf: string; // "PBKDF2-HMAC-SHA256"
+   698→  kdfIterations: number; // 200000
+   699→  /** first 12 hex chars of sha256(passphrase) — lets the user verify they typed the right key without storing it */
+   700→  keyFingerprint: string | null;
+   701→  frames: number | null;
+   702→  error: string | null;
+   703→  startedAt: string | null; // ISO
+   704→  endedAt: string | null; // ISO
+   705→  createdAt: string; // ISO
+   706→  updatedAt: string; // ISO
+   707→}
+   708→
+   709→/**
+   710→ * Encrypted artifact format (<recordingId>.enc) — shared by all agents,
+   711→ * the hub and tools/decrypt_recording.py:
+   712→ *
+   713→ *   Line 1 (ASCII, \n-terminated): JSON header
+   714→ *     { magic: "SENTRA-REC-1", cipher: "AES-256-GCM", kdf: "PBKDF2-HMAC-SHA256",
+   715→ *       iterations: 200000, salt: <b64 16B>, agentId, label?, durationSec,
+   716→ *       sources: [...], startedAt: epochMs }
+   717→ *   Then a sequence of framed records:
+   718→ *     [u32 BE length][12B nonce][ciphertext][16B tag]
+   719→ *     plaintext = JSON { t: epochMs, kind: "screen"|"camera"|"mic"|"meta",
+   720→ *                        sourceId?, mime?: "image/jpeg", dataB64?, level? }
+   721→ *   key = PBKDF2-HMAC-SHA256(passphrase, salt, iterations, 32 bytes)
+   722→ *   AAD = first 16 bytes of sha256(recordingId) (binds chunks to the recording)
+   723→ */
+   724→
+   725→// REST additions (standard { ok, data } envelope):
+   726→//
+   727→// GET  /api/recordings?deviceId=&limit=          → RecordingArtifact[]
+   728→// POST /api/recordings                           body: { deviceId, durationSec, monitors?, cameras?, mics?, passphrase, label? }
+   729→//                                                → RecordingArtifact (state "armed"); dispatches record:schedule
+   730→// GET  /api/recordings/[id]                      → RecordingArtifact
+   731→// DELETE /api/recordings/[id]                    → { ok } (cancels armed/recording via record:cancel, then deletes row + file)
+   732→// GET  /api/recordings/[id]/download             → binary stream (application/octet-stream, filename <recordingId>.enc)
+   733→//
+   734→// Internal (hub → api, x-hub-token):
+   735→// POST /api/internal/recording                   body: RecordingArtifact-shaped upsert { recordingId, ... } → { ok }
+   736→//
+   737→// Socket → dashboard:
+   738→//   "recording:update" { recording: RecordingArtifact }
+   739→//
+   740→// Agent request types (hub → agent):
+   741→//   "record:schedule" { recordingId, durationSec, monitors?, cameras?, mics?, passphrase, label?, noticeText? }
+   742→//                     ack { accepted: true, state } | ack error (agent MUST notify the device user on accept)
+   743→//   "record:cancel"   { recordingId }             ack { ok }
+   744→// Agent → hub socket events (with ack where noted):
+   745→//   "record:status"   { recordingId, state, elapsedSec?, sizeBytes?, frames?, error?, startedAt?, endedAt? }
+   746→//   "record:chunk"    { recordingId, seq, dataB64 }   ack { ok, bytes } (256KB max payload per chunk, ordered by seq)
+   747→//   "record:manifest" { recordingId, fileName, sizeBytes, sha256 }      ack { ok }
+   748→//
+   749→// Simulated agents cap recording duration at 120s (demo constraint); the
+   750→// real Python/Node agents record the full requested duration.
+   751→
+   752→// ─────────────────────── exec shell selection ──────────────────────
+   753→// agent request "exec" { command, shell?: ExecShell }  (default "powershell")
+   754→//   → { output, exitCode, durationMs, shell: ShellKind | "bash" }  (shell = effective shell used)
+   755→// "auto": try powershell, fall back to cmd when unavailable (Windows);
+   756→//         the reply always reports the effective shell.
+   757→// CommandExecution DB rows gain `effectiveShell: string | null`.
+   758→
+   759→// Device.captures (Device model): Json? column holding CaptureCapabilities,
+   760→// persisted at agent:register; devices without captures (legacy) render
+   761→// fallback pickers.
+   762→

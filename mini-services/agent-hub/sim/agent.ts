@@ -7,8 +7,10 @@ import type { DeviceMetrics } from "../../../src/lib/types";
 import { CONFIG, nextApi } from "../config";
 import { clamp, fmtBytes, jitter, pick, postJson, rndInt, round1, round4 } from "../util";
 import { runCommand, type ExecContext } from "./exec";
-import { svgDesktop, svgPoster, toDataUri } from "./media";
+import { runCommandCmd } from "./cmd";
+import { svgDesktop, svgPoster, svgWebcam, toDataUri } from "./media";
 import { ProcTable } from "./proc";
+import { SimRecorder } from "./record";
 import type { DeviceDef } from "./devices";
 import { seedDeviceFs, type Vfs } from "./vfs";
 
@@ -44,6 +46,19 @@ interface LiveStream {
   timer: ReturnType<typeof setInterval> | null;
 }
 
+/** v0.3 multi-source stream (any number may run simultaneously). */
+interface SimStream {
+  streamId: string;
+  kind: "screen" | "camera" | "mic";
+  sourceId: string;
+  fps: number;
+  width: number;
+  height: number;
+  seq: number;
+  timer: ReturnType<typeof setInterval> | null;
+  startedAt: number;
+}
+
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
 export class SimAgent {
@@ -57,12 +72,16 @@ export class SimAgent {
   private readonly media = new Map<string, MediaCapture>();
   private readonly net = new Map<string, NetCapture>();
   private live: LiveStream | null = null;
+  private readonly streams = new Map<string, SimStream>();
+  private recorder: SimRecorder | null = null;
+  private cmdCwd: string;
   private stopped = false;
 
   constructor(readonly def: DeviceDef) {
     this.vfs = seedDeviceFs(def);
     this.procTable = new ProcTable(def);
     this.bootTime = Date.now() - def.bootDaysAgo * 86_400_000 - rndInt(0, 3_600_000);
+    this.cmdCwd = `C:\\Users\\${def.userName}`;
     this.socket = io(`http://127.0.0.1:${CONFIG.port}`, {
       path: "/",
       reconnectionDelayMax: 5000,
@@ -73,14 +92,21 @@ export class SimAgent {
     const s = this.socket;
     s.on("connect", () => {
       this.log(`connected to hub (socket ${s.id})`);
-      s.emit("agent:register", { info: this.def.info }, (ack?: { ok?: boolean }) => {
-        if (ack?.ok) this.log("registered");
-        else this.log("registration rejected by hub");
-      });
+      s.emit(
+        "agent:register",
+        { info: { ...this.def.info, captures: this.def.captures } },
+        (ack?: { ok?: boolean }) => {
+          if (ack?.ok) this.log("registered (captures: monitors/cameras/mics/shells reported)");
+          else this.log("registration rejected by hub");
+        },
+      );
       this.ensureHeartbeat();
     });
     s.on("disconnect", (reason: string) => {
       this.log(`disconnected from hub (${reason}) — will reconnect`);
+      // v0.3 contract: agents stop streaming when they disconnect. Recordings
+      // keep running and buffer chunks until the hub is reachable again.
+      this.stopAllStreams();
     });
     s.on("connect_error", (err: Error) => {
       this.log(`hub connect error: ${err.message} — retrying`);
@@ -106,6 +132,9 @@ export class SimAgent {
     this.net.clear();
     if (this.live?.timer) clearInterval(this.live.timer);
     this.live = null;
+    this.stopAllStreams();
+    if (this.recorder && !this.recorder.isDone()) this.recorder.cancel();
+    this.recorder = null;
     this.socket.disconnect();
   }
 
@@ -157,6 +186,7 @@ export class SimAgent {
       uptimeSec,
       cpuPercent: this.lastMetrics?.cpuPercent ?? this.def.cpuBase,
       memPercent: this.lastMetrics?.memoryPercent ?? this.def.memBase,
+      cwd: this.cmdCwd,
     };
   }
 
@@ -179,9 +209,13 @@ export class SimAgent {
     switch (type) {
       case "exec": {
         const command = str(p.command);
-        const r = await runCommand(command, this.execCtx());
+        const wanted = str(p.shell) || "powershell";
+        const effective = wanted === "cmd" ? "cmd" : "powershell"; // sims always have powershell
+        const ctx = this.execCtx();
+        const r = effective === "cmd" ? await runCommandCmd(command, ctx) : await runCommand(command, ctx);
+        this.cmdCwd = ctx.cwd; // cmd `cd` persists across commands
         this.log(
-          `exec '${command}' ${r.exitCode === 0 ? "ok" : `exit ${r.exitCode}`} (${r.durationMs}ms)`,
+          `exec [${effective}] '${command}' ${r.exitCode === 0 ? "ok" : `exit ${r.exitCode}`} (${r.durationMs}ms)`,
         );
         return r;
       }
@@ -220,6 +254,14 @@ export class SimAgent {
         return this.startLiveStream(p);
       case "screen:live:stop":
         return this.stopLiveStream();
+      case "stream:start":
+        return this.startStream(p);
+      case "stream:stop":
+        return this.stopStream(str(p.streamId));
+      case "record:schedule":
+        return this.scheduleRecording(p);
+      case "record:cancel":
+        return this.cancelRecording(str(p.recordingId));
       default:
         throw new Error(`Unknown request type '${type}'`);
     }
@@ -363,6 +405,206 @@ export class SimAgent {
     this.live = null;
     this.log(`screen:live stopped (${stream.seq} frames streamed)`);
     return { frames: stream.seq };
+  }
+
+  // ── v0.3 multi-source streams ─────────────────────────────────────────
+
+  private num(v: unknown): number | null {
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  }
+
+  private startStream(p: Record<string, unknown>): { started: true; meta: Record<string, unknown> } {
+    const streamId = str(p.streamId);
+    if (!streamId) throw new Error("streamId is required");
+    const kind = str(p.kind);
+    if (kind !== "screen" && kind !== "camera" && kind !== "mic") {
+      throw new Error("kind must be one of: screen, camera, mic");
+    }
+    if (this.streams.has(streamId)) throw new Error(`Stream '${streamId}' is already running`);
+    const caps = this.def.captures;
+
+    let stream: SimStream;
+    let meta: Record<string, unknown>;
+    if (kind === "screen") {
+      const sourceId = str(p.sourceId) || caps.monitors[0]?.id || "monitor:0";
+      const idx = caps.monitors.findIndex((m) => m.id === sourceId);
+      if (idx < 0) {
+        throw new Error(
+          `Unknown monitor '${sourceId}' — available: ${caps.monitors.map((m) => m.id).join(", ") || "none"}`,
+        );
+      }
+      const mon = caps.monitors[idx]!;
+      const fps = clamp(this.num(p.fps) ?? 2, 0.5, 5);
+      stream = { streamId, kind, sourceId, fps, width: mon.width, height: mon.height, seq: 0, timer: null, startedAt: Date.now() };
+      meta = { width: mon.width, height: mon.height, fps, sourceId, name: mon.name, primary: mon.primary };
+    } else if (kind === "camera") {
+      const sourceId = str(p.sourceId) || caps.cameras[0]?.id || "camera:0";
+      const idx = caps.cameras.findIndex((c) => c.id === sourceId);
+      if (idx < 0) {
+        throw new Error(`Unknown camera '${sourceId}' — available: ${caps.cameras.map((c) => c.id).join(", ") || "none"}`);
+      }
+      const fps = clamp(this.num(p.fps) ?? 10, 1, 15);
+      stream = { streamId, kind, sourceId, fps, width: 1280, height: 720, seq: 0, timer: null, startedAt: Date.now() };
+      meta = { width: 1280, height: 720, fps, sourceId, name: caps.cameras[idx]!.name };
+    } else {
+      const sourceId = str(p.sourceId) || caps.mics[0]?.id || "mic:0";
+      const idx = caps.mics.findIndex((m) => m.id === sourceId);
+      if (idx < 0) {
+        throw new Error(`Unknown mic '${sourceId}' — available: ${caps.mics.map((m) => m.id).join(", ") || "none"}`);
+      }
+      stream = { streamId, kind, sourceId, fps: 8, width: 0, height: 0, seq: 0, timer: null, startedAt: Date.now() };
+      meta = { fps: 8, sourceId, name: caps.mics[idx]!.name };
+    }
+
+    this.streams.set(streamId, stream);
+    const interval = Math.round(1000 / stream.fps);
+    stream.timer = setInterval(() => this.emitStreamFrame(stream), interval);
+    this.log(`stream:start ${kind} '${stream.sourceId}' @${stream.fps}fps (streamId ${streamId.slice(0, 8)}…, ${this.streams.size} active)`);
+    return { started: true, meta };
+  }
+
+  private emitStreamFrame(stream: SimStream): void {
+    if (this.stopped || !this.socket.connected) return;
+    stream.seq += 1;
+    const frame: Record<string, unknown> = {
+      agentId: this.def.info.agentId,
+      streamId: stream.streamId,
+      kind: stream.kind,
+      ts: Date.now(),
+      seq: stream.seq,
+    };
+    if (stream.kind === "screen") {
+      // render at the monitor's advertised resolution so frames match meta
+      const shot = this.renderScreenSource(stream.sourceId, stream.width, stream.height);
+      frame.dataUri = shot.dataUri;
+      frame.width = shot.width;
+      frame.height = shot.height;
+    } else if (stream.kind === "camera") {
+      const idx = Math.max(0, this.def.captures.cameras.findIndex((c) => c.id === stream.sourceId));
+      const shot = this.renderCameraSource(stream.sourceId, idx);
+      frame.dataUri = shot.dataUri;
+      frame.width = 1280;
+      frame.height = 720;
+    } else {
+      frame.level = this.micLevel();
+    }
+    this.socket.emit("agent:event", { name: "stream:frame", payload: frame });
+  }
+
+  private stopStream(streamId: string): { frames: number } {
+    const stream = this.streams.get(streamId);
+    if (!stream) return { frames: 0 };
+    if (stream.timer) clearInterval(stream.timer);
+    this.streams.delete(streamId);
+    this.log(`stream:stop ${stream.kind} '${stream.sourceId}' (${stream.seq} frames streamed, ${this.streams.size} active)`);
+    return { frames: stream.seq };
+  }
+
+  private stopAllStreams(): void {
+    for (const stream of this.streams.values()) {
+      if (stream.timer) clearInterval(stream.timer);
+    }
+    if (this.streams.size > 0) {
+      this.log(`all ${this.streams.size} active stream(s) stopped (agent disconnect)`);
+    }
+    this.streams.clear();
+  }
+
+  /** SVG desktop render for a monitor source (variant 1 = second display). */
+  private renderScreenSource(sourceId: string, w: number, h: number): { dataUri: string; width: number; height: number } {
+    const idx = Math.max(0, this.def.captures.monitors.findIndex((m) => m.id === sourceId));
+    const m = this.lastMetrics;
+    const svg = svgDesktop({
+      hostname: this.def.info.hostname,
+      ip: this.def.info.localIp,
+      osLabel: `${this.def.info.osName} ${this.def.info.osVersion}`,
+      agentVersion: this.def.info.agentVersion,
+      cpu: m?.cpuPercent ?? this.def.cpuBase,
+      mem: m?.memoryPercent ?? this.def.memBase,
+      disk: this.def.diskPercent,
+      netUpKBps: Math.max(4, Math.round(jitter(this.def.netUpBase, this.def.netUpSpread))),
+      netDownKBps: Math.max(16, Math.round(jitter(this.def.netDownBase, this.def.netDownSpread))),
+      uptimeSec: Math.floor((Date.now() - this.bootTime) / 1000),
+      cpuHistory: this.cpuHistory,
+      palette: this.def.palette,
+      accent: this.def.accent,
+      now: new Date(),
+      w,
+      h,
+      variant: idx === 0 ? 0 : 1,
+    });
+    return { dataUri: toDataUri(svg), width: w, height: h };
+  }
+
+  private renderCameraSource(sourceId: string, idx: number): { dataUri: string; width: number; height: number } {
+    const cam = this.def.captures.cameras[idx] ?? { id: sourceId, name: "Camera" };
+    const svg = svgWebcam({
+      hostname: this.def.info.hostname,
+      cameraId: cam.id,
+      cameraName: cam.name,
+      elapsedSec: (Date.now() - this.bootTime) / 1000,
+      now: new Date(),
+      accent: this.def.accent,
+      variant: idx % 2,
+    });
+    return { dataUri: toDataUri(svg), width: 1280, height: 720 };
+  }
+
+  /** Mic input level 0.05..0.9 (sinusoid + noise), 8 Hz cadence. */
+  private micLevel(): number {
+    const t = Date.now() / 1000;
+    const base = 0.475 + 0.32 * Math.sin(t * 2.2) + 0.1 * Math.sin(t * 5.7);
+    const noise = (Math.random() * 2 - 1) * 0.08;
+    return Number(clamp(base + noise, 0.05, 0.9).toFixed(3));
+  }
+
+  // ── v0.3 scheduled recordings ─────────────────────────────────────────
+
+  private scheduleRecording(p: Record<string, unknown>): { accepted: true; state: "armed" } {
+    const recordingId = str(p.recordingId);
+    if (!recordingId) throw new Error("recordingId is required");
+    if (this.recorder && !this.recorder.isDone()) {
+      throw new Error("A recording is already active on this device");
+    }
+    const passphrase = str(p.passphrase);
+    if (!passphrase) throw new Error("passphrase is required");
+    const durationSec = clamp(Math.round(this.num(p.durationSec) ?? 0), 5, 120); // sim hard cap: 120s
+    const list = (v: unknown): string[] | undefined =>
+      Array.isArray(v) && v.length > 0 ? v.filter((x): x is string => typeof x === "string") : undefined;
+    const sources = {
+      ...(list(p.monitors) ? { monitors: list(p.monitors) } : {}),
+      ...(list(p.cameras) ? { cameras: list(p.cameras) } : {}),
+      ...(list(p.mics) ? { mics: list(p.mics) } : {}),
+    };
+    const label = str(p.label) || null;
+    this.log(
+      `record:schedule ${recordingId} armed (${durationSec}s) — on-device notice shown, indicator will be visible while recording`,
+    );
+    this.recorder = new SimRecorder({
+      socket: this.socket,
+      agentId: this.def.info.agentId,
+      hostname: this.def.info.hostname,
+      recordingId,
+      durationSec,
+      passphrase,
+      label,
+      sources,
+      renderScreen: (sourceId) => this.renderScreenSource(sourceId, 1280, 720),
+      renderCamera: (sourceId) =>
+        this.renderCameraSource(sourceId, Math.max(0, this.def.captures.cameras.findIndex((c) => c.id === sourceId))),
+      micLevel: () => this.micLevel(),
+      log: (msg) => this.log(msg),
+    });
+    return { accepted: true, state: "armed" };
+  }
+
+  private cancelRecording(recordingId: string): { ok: true; state: string } {
+    if (!this.recorder || this.recorder.isDone()) {
+      this.log(`record:cancel ${recordingId}: no active recording`);
+      return { ok: true, state: "idle" };
+    }
+    this.recorder.cancel();
+    return { ok: true, state: "canceled" };
   }
 
   // ── network capture ───────────────────────────────────────────────────

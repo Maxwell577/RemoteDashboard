@@ -1,0 +1,758 @@
+     1→"""RFT mode: scope-aware identifier renaming.
+     2→
+     3→Renames function-local names, module-level private names, comprehension
+     4→targets and lambda args with collision-free generated names. Class-scope
+     5→names, import aliases, dunders, __all__ entries and any name that also
+     6→appears as a string constant are left untouched (safety net).
+     7→"""
+     8→import ast
+     9→import builtins
+    10→import random
+    11→import re
+    12→import string
+    13→
+    14→BUILTIN_NAMES = set(dir(builtins))
+    15→RESERVED = {"__all__", "__file__", "__name__", "__doc__", "__package__", "__spec__"}
+    16→DYNAMIC = {"globals", "locals", "vars", "dir", "eval", "exec", "__import__", "breakpoint", "pdb"}
+    17→_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    18→
+    19→FUNCTION_KINDS = ("function", "lambda", "comprehension")
+    20→
+    21→
+    22→def _dunder(name):
+    23→    return name.startswith("__") and name.endswith("__")
+    24→
+    25→
+    26→class Scope:
+    27→    __slots__ = ("kind", "node", "parent", "binds", "imports", "gdecl", "nldecl",
+    28→                 "renames", "risky", "func_name", "argmap", "kids", "funcdefs",
+    29→                 "classdefs")
+    30→
+    31→    def __init__(self, kind, node, parent):
+    32→        self.kind = kind
+    33→        self.node = node
+    34→        self.parent = parent
+    35→        self.binds = set()
+    36→        self.imports = set()
+    37→        self.gdecl = set()
+    38→        self.nldecl = set()
+    39→        self.renames = {}
+    40→        self.risky = False
+    41→        self.func_name = None
+    42→        self.argmap = None
+    43→        self.kids = []
+    44→        self.funcdefs = {}
+    45→        self.classdefs = {}
+    46→
+    47→
+    48→class Analyzer(ast.NodeVisitor):
+    49→    """Pass 1: build the scope tree, collect bindings/strings/risk."""
+    50→
+    51→    def __init__(self):
+    52→        self.stack = []
+    53→        self.module_scope = None
+    54→        self.all_strings = set()
+    55→        self.dunder_all = set()
+    56→        self.used_ids = set()
+    57→        self.import_aliases = {}      # binding -> ('abs', qualname) | ('rel', level, module, attr)
+    58→        self.rel_imports = []         # raw ImportFrom nodes with level>0
+    59→        self.import_bindings = set()
+    60→
+    61→    @property
+    62→    def cur(self):
+    63→        return self.stack[-1]
+    64→
+    65→    def _new_scope(self, kind, node, parent):
+    66→        s = Scope(kind, node, parent)
+    67→        if parent is not None:
+    68→            parent.kids.append(s)
+    69→        return s
+    70→
+    71→    def visit_Module(self, node):
+    72→        s = self._new_scope("module", node, None)
+    73→        self.module_scope = s
+    74→        self.stack.append(s)
+    75→        self.generic_visit(node)
+    76→        self.stack.pop()
+    77→
+    78→    # -- helpers -------------------------------------------------------
+    79→    def _bind(self, name, scope=None):
+    80→        s = scope or self.cur
+    81→        if name in s.gdecl:
+    82→            self.module_scope.binds.add(name)
+    83→        elif name in s.nldecl:
+    84→            tgt = self._nonlocal_target(name, s)
+    85→            if tgt:
+    86→                tgt.binds.add(name)
+    87→        else:
+    88→            s.binds.add(name)
+    89→
+    90→    def _nonlocal_target(self, name, start):
+    91→        s = start.parent
+    92→        while s is not None:
+    93→            if s.kind != "module" and name in s.binds:
+    94→                return s
+    95→            if s.kind == "module":
+    96→                return None
+    97→            s = s.parent
+    98→        return None
+    99→
+   100→    def _mark_risky(self, name):
+   101→        if name in DYNAMIC:
+   102→            self.cur.risky = True
+   103→            self.module_scope.risky = True
+   104→
+   105→    def _track_id(self, name):
+   106→        if name and _IDENT_RE.match(name):
+   107→            self.used_ids.add(name)
+   108→
+   109→    # -- visitors ------------------------------------------------------
+   110→    def visit_Name(self, node):
+   111→        self._track_id(node.id)
+   112→        self._mark_risky(node.id)
+   113→        if isinstance(node.ctx, ast.Store):
+   114→            self._bind(node.id)
+   115→
+   116→    def visit_Constant(self, node):
+   117→        if isinstance(node.value, str):
+   118→            self.all_strings.add(node.value)
+   119→
+   120→    def visit_Call(self, node):
+   121→        if isinstance(node.func, ast.Name):
+   122→            self._mark_risky(node.func.id)
+   123→        self.generic_visit(node)
+   124→
+   125→    def visit_Global(self, node):
+   126→        self.cur.gdecl.update(node.names)
+   127→        for n in node.names:
+   128→            self.module_scope.binds.add(n)
+   129→
+   130→    def visit_Nonlocal(self, node):
+   131→        self.cur.nldecl.update(node.names)
+   132→
+   133→    def visit_Import(self, node):
+   134→        for a in node.names:
+   135→            b = a.asname or a.name.split(".")[0]
+   136→            self.cur.imports.add(b)
+   137→            self.import_bindings.add(b)
+   138→            self.import_aliases[b] = ("abs", a.name if a.asname else a.name.split(".")[0])
+   139→            self._track_id(b)
+   140→
+   141→    def visit_ImportFrom(self, node):
+   142→        if node.level:
+   143→            self.rel_imports.append(node)
+   144→        for a in node.names:
+   145→            if a.name == "*":
+   146→                self.module_scope.risky = True
+   147→                self.cur.risky = True
+   148→                continue
+   149→            b = a.asname or a.name
+   150→            self.cur.imports.add(b)
+   151→            self.import_bindings.add(b)
+   152→            if node.level:
+   153→                self.import_aliases[b] = ("rel", node.level, node.module or "", a.name)
+   154→            else:
+   155→                self.import_aliases[b] = ("abs", (node.module or "") + "." + a.name)
+   156→            self._track_id(b)
+   157→        self.generic_visit(node)
+   158→
+   159→    def _visit_func_common(self, node, kind):
+   160→        cur = self.cur
+   161→        cur.binds.add(node.name)
+   162→        self._track_id(node.name)
+   163→        s = self._new_scope(kind, node, cur)
+   164→        s.func_name = node.name
+   165→        s.argmap = {}
+   166→        for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+   167→            s.binds.add(a.arg)
+   168→            self._track_id(a.arg)
+   169→        if node.args.vararg:
+   170→            s.binds.add(node.args.vararg.arg)
+   171→        if node.args.kwarg:
+   172→            s.binds.add(node.args.kwarg.arg)
+   173→        # decorators / defaults / annotations evaluate in the OUTER scope
+   174→        for d in node.decorator_list:
+   175→            self.visit(d)
+   176→        for d in node.args.defaults:
+   177→            self.visit(d)
+   178→        for d in node.args.kw_defaults:
+   179→            if d is not None:
+   180→                self.visit(d)
+   181→        for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+   182→            if a.annotation:
+   183→                self.visit(a.annotation)
+   184→        if node.returns:
+   185→            self.visit(node.returns)
+   186→        self.stack.append(s)
+   187→        for st in node.body:
+   188→            self.visit(st)
+   189→        self.stack.pop()
+   190→
+   191→    def visit_FunctionDef(self, node):
+   192→        self._visit_func_common(node, "function")
+   193→
+   194→    def visit_AsyncFunctionDef(self, node):
+   195→        self._visit_func_common(node, "function")
+   196→
+   197→    def visit_Lambda(self, node):
+   198→        s = self._new_scope("lambda", node, self.cur)
+   199→        for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+   200→            s.binds.add(a.arg)
+   201→            self._track_id(a.arg)
+   202→        if node.args.vararg:
+   203→            s.binds.add(node.args.vararg.arg)
+   204→        if node.args.kwarg:
+   205→            s.binds.add(node.args.kwarg.arg)
+   206→        for d in node.args.defaults:
+   207→            self.visit(d)
+   208→        for d in node.args.kw_defaults:
+   209→            if d is not None:
+   210→                self.visit(d)
+   211→        self.stack.append(s)
+   212→        self.visit(node.body)
+   213→        self.stack.pop()
+   214→
+   215→    def visit_ClassDef(self, node):
+   216→        self.cur.binds.add(node.name)
+   217→        self._track_id(node.name)
+   218→        for d in node.decorator_list:
+   219→            self.visit(d)
+   220→        for b in node.bases:
+   221→            self.visit(b)
+   222→        for k in node.keywords:
+   223→            self.visit(k.value)
+   224→        s = self._new_scope("class", node, self.cur)
+   225→        self.stack.append(s)
+   226→        for st in node.body:
+   227→            self.visit(st)
+   228→        self.stack.pop()
+   229→
+   230→    def _visit_comp(self, node):
+   231→        s = self._new_scope("comprehension", node, self.cur)
+   232→        gens = node.generators
+   233→        self.visit(gens[0].iter)  # first iterable in the enclosing scope
+   234→        self.stack.append(s)
+   235→        for i, g in enumerate(gens):
+   236→            for t in ast.walk(g.target):
+   237→                if isinstance(t, ast.Name):
+   238→                    s.binds.add(t.id)
+   239→                    self._track_id(t.id)
+   240→            if i:
+   241→                self.visit(g.iter)  # 2nd+ iterables evaluate in comp scope
+   242→            for cond in g.ifs:
+   243→                self.visit(cond)
+   244→        if isinstance(node, ast.DictComp):
+   245→            self.visit(node.key)
+   246→            self.visit(node.value)
+   247→        else:
+   248→            self.visit(node.elt)
+   249→        self.stack.pop()
+   250→
+   251→    def visit_ListComp(self, node):
+   252→        self._visit_comp(node)
+   253→
+   254→    def visit_SetComp(self, node):
+   255→        self._visit_comp(node)
+   256→
+   257→    def visit_GeneratorExp(self, node):
+   258→        self._visit_comp(node)
+   259→
+   260→    def visit_DictComp(self, node):
+   261→        self._visit_comp(node)
+   262→
+   263→    def visit_NamedExpr(self, node):
+   264→        # PEP 572: walrus target binds in nearest enclosing function/module scope
+   265→        self.visit(node.value)
+   266→        if isinstance(node.target, ast.Name):
+   267→            s = self.cur
+   268→            while s is not None and s.kind == "comprehension":
+   269→                s = s.parent
+   270→            self._bind(node.target.id, s or self.module_scope)
+   271→            self._track_id(node.target.id)
+   272→
+   273→    def visit_Assign(self, node):
+   274→        for t in node.targets:
+   275→            if isinstance(t, ast.Name) and t.id == "__all__" and self.cur.kind == "module":
+   276→                for n in ast.walk(node.value):
+   277→                    if isinstance(n, ast.Constant) and isinstance(n.value, str):
+   278→                        self.dunder_all.add(n.value)
+   279→        self.generic_visit(node)
+   280→
+   281→    def visit_ExceptHandler(self, node):
+   282→        if node.name:
+   283→            self._bind(node.name)
+   284→            self._track_id(node.name)
+   285→        self.generic_visit(node)
+   286→
+   287→    def visit_MatchAs(self, node):
+   288→        if node.name:
+   289→            self._bind(node.name)
+   290→            self._track_id(node.name)
+   291→        if node.pattern:
+   292→            self.visit(node.pattern)
+   293→
+   294→    def visit_MatchStar(self, node):
+   295→        if node.name:
+   296→            self._bind(node.name)
+   297→
+   298→    def visit_MatchMapping(self, node):
+   299→        if node.rest:
+   300→            self._bind(node.rest)
+   301→        self.generic_visit(node)
+   302→
+   303→
+   304→
+   305→
+   306→# ---------------------------------------------------------------- pass 2: decide
+   307→
+   308→class ModuleInfo:
+   309→    def __init__(self, analyzer, module_name):
+   310→        self.a = analyzer
+   311→        self.module_name = module_name
+   312→        self.module_renames = {}     # old -> new for module-level private names
+   313→        self.funcargmaps = {}        # module func old-name -> {arg_old: arg_new}
+   314→        self.scope_by_node = {}
+   315→        self.exports = set()         # cross-module names other modules import
+   316→        ms = analyzer.module_scope
+   317→        stack = [ms]
+   318→        while stack:
+   319→            s = stack.pop()
+   320→            self.scope_by_node[id(s.node)] = s
+   321→            stack.extend(s.kids)
+   322→
+   323→    @property
+   324→    def import_aliases(self):
+   325→        return self.a.import_aliases
+   326→
+   327→
+   328→def analyze(tree):
+   329→    a = Analyzer()
+   330→    a.visit(tree)
+   331→    return a
+   332→
+   333→
+   334→def decide(a, module_name, excludes=(), rng=None):
+   335→    """Choose rename maps for every scope. Returns ModuleInfo."""
+   336→    rng = rng or random.Random()
+   337→    info = ModuleInfo(a, module_name)
+   338→    used = set(a.used_ids)
+   339→
+   340→    def new_name():
+   341→        for _ in range(400):
+   342→            n = "_0x" + "".join(rng.choice("0123456789abcdef") for _ in range(4))
+   343→            if n not in used:
+   344→                used.add(n)
+   345→                return n
+   346→        raise RuntimeError("cannot generate unique rename target")
+   347→
+   348→    ms = a.module_scope
+   349→    hits = set()
+   350→    for name in sorted(ms.binds):
+   351→        if (_dunder(name) or name in RESERVED or name in ms.imports
+   352→                or name in a.dunder_all or name in excludes or name in a.all_strings
+   353→                or name in BUILTIN_NAMES):
+   354→            continue
+   355→        hits.add(name)
+   356→    if ms.risky:
+   357→        hits = set()
+   358→    for name in sorted(hits):
+   359→        ms.renames[name] = new_name()
+   360→    info.module_renames = dict(ms.renames)
+   361→
+   362→    def walk(s):
+   363→        if s.kind in FUNCTION_KINDS and not s.risky:
+   364→            for name in sorted(s.binds):
+   365→                if _dunder(name) or name in a.all_strings or name in s.imports:
+   366→                    continue
+   367→                if name in s.gdecl or name in s.nldecl:
+   368→                    continue
+   369→                if name in ms.renames and s.kind == "function" and name in s.gdecl:
+   370→                    continue
+   371→                s.renames[name] = new_name()
+   372→            if s.func_name and s.kind == "function" and s.node is not None:
+   373→                amap = {a_.arg: s.renames.get(a_.arg, a_.arg)
+   374→                        for a_ in (s.node.args.posonlyargs + s.node.args.args
+   375→                                   + s.node.args.kwonlyargs) if a_.arg in s.renames}
+   376→                if amap:
+   377→                    s.argmap = amap
+   378→                    info.funcargmaps[s.func_name] = amap
+   379→        for k in s.kids:
+   380→            walk(k)
+   381→
+   382→    walk(ms)
+   383→    return info
+   384→
+   385→
+   386→# ---------------------------------------------------------------- pass 3: rewrite
+   387→
+   388→class Rewriter(ast.NodeTransformer):
+   389→    def __init__(self, info):
+   390→        self.info = info
+   391→        self.a = info.a
+   392→        self.by_node = info.scope_by_node
+   393→        self.stack = []
+   394→        # pre-register function scopes so call-site keyword fixing works
+   395→        # even for calls that appear before the def in source order
+   396→        for s in info.scope_by_node.values():
+   397→            if s.kind == "function" and s.func_name and s.parent is not None:
+   398→                s.parent.funcdefs[s.func_name] = s
+   399→        # same for class scopes: `Game(...)` instantiation must consult
+   400→        # Game.__init__'s renamed params
+   401→        for s in info.scope_by_node.values():
+   402→            if s.kind == "class" and s.parent is not None and s.node is not None:
+   403→                s.parent.classdefs[s.node.name] = s
+   404→
+   405→    def cur(self):
+   406→        return self.stack[-1]
+   407→
+   408→    def _resolve(self, name, scope):
+   409→        came_from_func = scope.kind in FUNCTION_KINDS
+   410→        s = scope
+   411→        while s is not None:
+   412→            if s.kind == "class" and came_from_func:
+   413→                s = s.parent
+   414→                continue
+   415→            if name in s.gdecl:
+   416→                return self.a.module_scope
+   417→            if name in s.binds:
+   418→                return s
+   419→            if s.kind == "module":
+   420→                return None
+   421→            came_from_func = came_from_func or s.kind in FUNCTION_KINDS
+   422→            s = s.parent
+   423→        return None
+   424→
+   425→    def _rename(self, name):
+   426→        s = self._resolve(name, self.cur())
+   427→        if s is not None:
+   428→            return s.renames.get(name, name)
+   429→        return name
+   430→
+   431→    def visit_Name(self, node):
+   432→        new = self._rename(node.id)
+   433→        if new != node.id:
+   434→            return ast.copy_location(ast.Name(id=new, ctx=node.ctx), node)
+   435→        return node
+   436→
+   437→    def visit_arg(self, node):
+   438→        new = self.cur().renames.get(node.arg, node.arg)
+   439→        if new != node.arg:
+   440→            return ast.copy_location(ast.arg(arg=new, annotation=node.annotation), node)
+   441→        return node
+   442→
+   443→    def visit_Global(self, node):
+   444→        ms = self.a.module_scope
+   445→        node.names = [ms.renames.get(n, n) for n in node.names]
+   446→        return node
+   447→
+   448→    def visit_Nonlocal(self, node):
+   449→        out = []
+   450→        for n in node.names:
+   451→            s = self.cur().parent
+   452→            tgt = None
+   453→            while s is not None:
+   454→                if s.kind != "module" and n in s.binds:
+   455→                    tgt = s
+   456→                    break
+   457→                if s.kind == "module":
+   458→                    break
+   459→                s = s.parent
+   460→            out.append(tgt.renames.get(n, n) if tgt else n)
+   461→        node.names = out
+   462→        return node
+   463→
+   464→    def _visit_scope_node(self, node, kind, rename_name=True):
+   465→        cur = self.cur()
+   466→        if rename_name and node.name in cur.renames:
+   467→            node.name = cur.renames[node.name]
+   468→        s = self.by_node.get(id(node))
+   469→        # outer-scope expressions first (matches analyzer order)
+   470→        node.decorator_list = [self.visit(d) for d in (node.decorator_list or [])]
+   471→        args = getattr(node, "args", None)
+   472→        if args is not None:
+   473→            args.defaults = [self.visit(d) for d in args.defaults]
+   474→            args.kw_defaults = [self.visit(d) if d is not None else None
+   475→                                for d in args.kw_defaults]
+   476→            for a in args.posonlyargs + args.args + args.kwonlyargs:
+   477→                if a.annotation:
+   478→                    a.annotation = self.visit(a.annotation)
+   479→        if getattr(node, "returns", None):
+   480→            node.returns = self.visit(node.returns)
+   481→        if s is None:
+   482→            self.generic_visit(node)
+   483→            return node
+   484→        self.stack.append(s)
+   485→        if args is not None:
+   486→            args.posonlyargs = [self.visit(a) for a in args.posonlyargs]
+   487→            args.args = [self.visit(a) for a in args.args]
+   488→            args.kwonlyargs = [self.visit(a) for a in args.kwonlyargs]
+   489→            if args.vararg:
+   490→                args.vararg = self.visit(args.vararg)
+   491→            if args.kwarg:
+   492→                args.kwarg = self.visit(args.kwarg)
+   493→        if kind == "class":
+   494→            node.bases = [self.visit(b) for b in node.bases]
+   495→            for k in node.keywords:
+   496→                k.value = self.visit(k.value)
+   497→        node.body = [self.visit(st) for st in node.body]
+   498→        self.stack.pop()
+   499→        return node
+   500→
+   501→    def visit_FunctionDef(self, node):
+   502→        return self._visit_scope_node(node, "function")
+   503→
+   504→    def visit_AsyncFunctionDef(self, node):
+   505→        return self._visit_scope_node(node, "function")
+   506→
+   507→    def visit_ClassDef(self, node):
+   508→        return self._visit_scope_node(node, "class")
+   509→
+   510→    def visit_Lambda(self, node):
+   511→        s = self.by_node.get(id(node))
+   512→        if s is None:
+   513→            return self.generic_visit(node)
+   514→        node.args.defaults = [self.visit(d) for d in node.args.defaults]
+   515→        node.args.kw_defaults = [self.visit(d) if d is not None else None
+   516→                                 for d in node.args.kw_defaults]
+   517→        self.stack.append(s)
+   518→        node.args.posonlyargs = [self.visit(a) for a in node.args.posonlyargs]
+   519→        node.args.args = [self.visit(a) for a in node.args.args]
+   520→        node.args.kwonlyargs = [self.visit(a) for a in node.args.kwonlyargs]
+   521→        if node.args.vararg:
+   522→            node.args.vararg = self.visit(node.args.vararg)
+   523→        if node.args.kwarg:
+   524→            node.args.kwarg = self.visit(node.args.kwarg)
+   525→        node.body = self.visit(node.body)
+   526→        self.stack.pop()
+   527→        return node
+   528→
+   529→    def _visit_comp(self, node):
+   530→        s = self.by_node.get(id(node))
+   531→        if s is None:
+   532→            return self.generic_visit(node)
+   533→        gens = node.generators
+   534→        gens[0].iter = self.visit(gens[0].iter)
+   535→        self.stack.append(s)
+   536→        for i, g in enumerate(gens):
+   537→            if i:
+   538→                g.iter = self.visit(g.iter)  # 2nd+ iterables eval in comp scope
+   539→            g.target = self.visit(g.target)
+   540→            g.ifs = [self.visit(c) for c in g.ifs]
+   541→        if isinstance(node, ast.DictComp):
+   542→            node.key = self.visit(node.key)
+   543→            node.value = self.visit(node.value)
+   544→        else:
+   545→            node.elt = self.visit(node.elt)
+   546→        self.stack.pop()
+   547→        return node
+   548→
+   549→    def visit_ListComp(self, node):
+   550→        return self._visit_comp(node)
+   551→
+   552→    def visit_SetComp(self, node):
+   553→        return self._visit_comp(node)
+   554→
+   555→    def visit_GeneratorExp(self, node):
+   556→        return self._visit_comp(node)
+   557→
+   558→    def visit_DictComp(self, node):
+   559→        return self._visit_comp(node)
+   560→
+   561→    def visit_ExceptHandler(self, node):
+   562→        if node.name:
+   563→            new = self.cur().renames.get(node.name, node.name)
+   564→            node.name = new
+   565→        self.generic_visit(node)
+   566→        return node
+   567→
+   568→    def visit_MatchAs(self, node):
+   569→        if node.pattern:
+   570→            self.visit(node.pattern)
+   571→        if node.name:
+   572→            node.name = self.cur().renames.get(node.name, node.name)
+   573→        return node
+   574→
+   575→    def visit_MatchStar(self, node):
+   576→        if node.name:
+   577→            node.name = self.cur().renames.get(node.name, node.name)
+   578→        return node
+   579→
+   580→    def visit_MatchMapping(self, node):
+   581→        self.generic_visit(node)
+   582→        if node.rest:
+   583→            node.rest = self.cur().renames.get(node.rest, node.rest)
+   584→        return node
+   585→
+   586→    def visit_Call(self, node):
+   587→        # keyword-argument fixing for same-module callees whose params got renamed
+   588→        amap = None
+   589→        if isinstance(node.func, ast.Name):
+   590→            s = self._resolve(node.func.id, self.cur())
+   591→            if s is not None:
+   592→                fscope = s.funcdefs.get(node.func.id)
+   593→                if fscope is not None and fscope.argmap:
+   594→                    amap = fscope.argmap
+   595→                elif s.kind == "module" and node.func.id in self.info.funcargmaps:
+   596→                    amap = self.info.funcargmaps[node.func.id]
+   597→                else:
+   598→                    cscope = s.classdefs.get(node.func.id)
+   599→                    if cscope is not None:
+   600→                        iscope = cscope.funcdefs.get("__init__")
+   601→                        if iscope is not None and iscope.argmap:
+   602→                            amap = iscope.argmap
+   603→        self.generic_visit(node)
+   604→        if amap:
+   605→            for kw in node.keywords:
+   606→                if kw.arg is not None and kw.arg in amap:
+   607→                    kw.arg = amap[kw.arg]
+   608→        return node
+   609→
+   610→
+   611→def apply(tree, info):
+   612→    """Pass 3: rewrite identifiers using the decided maps."""
+   613→    r = Rewriter(info)
+   614→    r.stack = [info.a.module_scope]
+   615→    new = r.visit(tree)
+   616→    ast.fix_missing_locations(new)
+   617→    return new
+   618→
+   619→
+   620→# ------------------------------------------------- cross-module references
+   621→
+   622→class CrossRewriter(ast.NodeTransformer):
+   623→    """Rewrites `mod.name` / `from mod import name` / keyword args that refer
+   624→    to OTHER protected modules whose module-level names were renamed."""
+   625→
+   626→    def __init__(self, module_name, package, maps, funcargs, protected):
+   627→        self.module_name = module_name
+   628→        self.pkg = package or ""
+   629→        self.maps = maps
+   630→        self.funcargs = funcargs
+   631→        self.protected = protected
+   632→        self.import_targets = {}
+   633→        self.exports = {}
+   634→
+   635→    def _resolve_rel(self, level, module):
+   636→        parts = self.pkg.split(".") if self.pkg else []
+   637→        if level - 1 > len(parts):
+   638→            return None
+   639→        base = parts[: len(parts) - (level - 1)]
+   640→        if module:
+   641→            base = base + module.split(".")
+   642→        return ".".join(base)
+   643→
+   644→    def visit_Import(self, node):
+   645→        for a in node.names:
+   646→            b = a.asname or a.name.split(".")[0]
+   647→            self.import_targets[b] = ("module", a.name if a.asname else a.name.split(".")[0])
+   648→        return node
+   649→
+   650→    def visit_ImportFrom(self, node):
+   651→        mod = node.module
+   652→        if node.level:
+   653→            mod = self._resolve_rel(node.level, node.module)
+   654→        if mod is None:
+   655→            return node
+   656→        for a in node.names:
+   657→            if a.name == "*":
+   658→                continue
+   659→            orig = a.name
+   660→            full = mod + "." + orig
+   661→            binding = a.asname or orig
+   662→            if full in self.protected:
+   663→                self.import_targets[binding] = ("module", full)
+   664→            elif mod in self.maps and orig in self.maps[mod]:
+   665→                new = self.maps[mod][orig]
+   666→                if a.asname is None:
+   667→                    a.asname = orig
+   668→                a.name = new
+   669→                self.exports.setdefault(mod, set()).add(new)
+   670→                self.import_targets[binding] = ("attr", mod, orig)
+   671→        return node
+   672→
+   673→    def visit_Attribute(self, node):
+   674→        node.value = self.visit(node.value)
+   675→        chain = []
+   676→        root = node
+   677→        while isinstance(root, ast.Attribute):
+   678→            chain.append(root.attr)
+   679→            root = root.value
+   680→        if not isinstance(root, ast.Name):
+   681→            return node
+   682→        tgt = self.import_targets.get(root.id)
+   683→        if not tgt or tgt[0] != "module":
+   684→            return node
+   685→        qual = tgt[1]
+   686→        chain.reverse()
+   687→        new_attrs = []
+   688→        changed = False
+   689→        i = 0
+   690→        while i < len(chain):
+   691→            attr = chain[i]
+   692→            if qual and qual in self.maps and attr in self.maps[qual]:
+   693→                new = self.maps[qual][attr]
+   694→                new_attrs.append(new)
+   695→                self.exports.setdefault(qual, set()).add(new)
+   696→                changed = True
+   697→                i += 1
+   698→                break
+   699→            sub = (qual + "." + attr) if qual else attr
+   700→            if sub in self.protected:
+   701→                new_attrs.append(attr)
+   702→                qual = sub
+   703→                i += 1
+   704→                continue
+   705→            break
+   706→        new_attrs.extend(chain[i:])
+   707→        if not changed:
+   708→            return node
+   709→        result = root
+   710→        for attr in new_attrs:
+   711→            result = ast.Attribute(value=result, attr=attr, ctx=ast.Load())
+   712→        result = ast.copy_location(result, node)
+   713→        result.ctx = node.ctx
+   714→        return result
+   715→
+   716→    def visit_Call(self, node):
+   717→        amap = None
+   718→        if isinstance(node.func, ast.Name):
+   719→            tgt = self.import_targets.get(node.func.id)
+   720→            if tgt and tgt[0] == "attr":
+   721→                _t, mod, orig = tgt
+   722→                amap = self.funcargs.get(mod, {}).get(orig)
+   723→        elif isinstance(node.func, ast.Attribute):
+   724→            chain, root = [], node.func
+   725→            while isinstance(root, ast.Attribute):
+   726→                chain.append(root.attr)
+   727→                root = root.value
+   728→            if isinstance(root, ast.Name):
+   729→                tgt = self.import_targets.get(root.id)
+   730→                if tgt and tgt[0] == "module":
+   731→                    qual = tgt[1]
+   732→                    chain.reverse()
+   733→                    ok = True
+   734→                    for attr in chain[:-1]:
+   735→                        sub = qual + "." + attr
+   736→                        if sub in self.protected:
+   737→                            qual = sub
+   738→                        else:
+   739→                            ok = False
+   740→                            break
+   741→                    if ok:
+   742→                        amap = self.funcargs.get(qual, {}).get(chain[-1])
+   743→        node = self.generic_visit(node)
+   744→        if amap:
+   745→            for kw in node.keywords:
+   746→                if kw.arg in amap:
+   747→                    kw.arg = amap[kw.arg]
+   748→        return node
+   749→
+   750→
+   751→def cross_rewrite(tree, module_name, package, infos, protected):
+   752→    maps = {m: i.module_renames for m, i in infos.items()}
+   753→    funcargs = {m: i.funcargmaps for m, i in infos.items()}
+   754→    cr = CrossRewriter(module_name, package, maps, funcargs, protected)
+   755→    tree = cr.visit(tree)
+   756→    ast.fix_missing_locations(tree)
+   757→    return tree, cr.exports
+   758→

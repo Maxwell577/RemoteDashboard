@@ -157,7 +157,7 @@ function PresenceSoundRow() {
 
 function AgentEnrollment({ hubUrl, heartbeatSec }: { hubUrl: string; heartbeatSec: number }) {
   const hub = hubUrl?.trim() || 'http://127.0.0.1:3003'
-  const [track, setTrack] = useState<'node' | 'ps'>('node')
+  const [track, setTrack] = useState<'node' | 'ps' | 'python'>('node')
 
   // The reference agent is plain Node.js — no build step, runs on Windows/
   // macOS/Linux and speaks the same socket.io protocol as the simulated fleet.
@@ -171,7 +171,17 @@ $token = "<your-hub-token>"   # x-hub-token shared secret (keep private)
 irm "$hub/agent/install.ps1" -OutFile "$env:TEMP\\sentra-install.ps1"
 pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -Hub $hub -Token $token`
 
-  const cmd = track === 'node' ? nodeCmd : psCmd
+  // The Python/Windows agent ships PyFortress-protected (encrypted + obfuscated
+  // bytecode) with multi-monitor/camera/mic capture and offline encrypted
+  // recordings — build it from the repo, then point it at this hub.
+  const pyCmd = `# 1 · install dependencies (Windows, Python 3.10+)
+pip install -r agent-python/requirements.txt
+# 2 · build the PyFortress-protected agent bundle
+python agent-python/build/build_encrypted.py --level strong
+# 3 · run the protected agent — the device appears in Devices instantly
+python dist_agent/agent.py --hub ${hub}`
+
+  const cmd = track === 'node' ? nodeCmd : track === 'python' ? pyCmd : psCmd
 
   const copyCmd = async () => {
     try {
@@ -180,7 +190,9 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -H
         description:
           track === 'node'
             ? 'Run it inside the agent/ folder on the target machine.'
-            : 'Paste into an elevated PowerShell window on the target machine.',
+            : track === 'python'
+              ? 'Run it from the repo root on the target Windows machine.'
+              : 'Paste into an elevated PowerShell window on the target machine.',
       })
     } catch {
       toast.error('Clipboard unavailable — select the text manually')
@@ -229,11 +241,16 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -H
         <div
           role="tablist"
           aria-label="Agent installer type"
-          className="glass-inset flex w-max gap-1 rounded-xl p-1"
+          className="glass-inset flex w-max max-w-full flex-wrap gap-1 rounded-xl p-1"
         >
           {(
             [
               { id: 'node', label: 'Node agent (cross-platform)', ready: true },
+              {
+                id: 'python',
+                label: 'Python agent (Windows · PyFortress-encrypted)',
+                ready: true,
+              },
               { id: 'ps', label: 'PowerShell installer (planned)', ready: false },
             ] as const
           ).map((t) => (
@@ -266,7 +283,11 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -H
           <div className="flex items-center justify-between gap-2 border-b border-border/40 px-3 py-2">
             <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
               <TerminalSquare className="h-3.5 w-3.5" />
-              {track === 'node' ? 'shell — on the target machine' : 'PowerShell — run as Administrator'}
+              {track === 'node'
+                ? 'shell — on the target machine'
+                : track === 'python'
+                  ? 'shell — on the target Windows machine'
+                  : 'PowerShell — run as Administrator'}
             </span>
             <Button size="sm" variant="ghost" className="h-8 gap-1.5 px-2" onClick={() => void copyCmd()}>
               <Copy className="h-3.5 w-3.5" /> Copy
@@ -293,6 +314,12 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\sentra-install.ps1" -H
               file-manager scope and streams real Windows screenshots — and it says so honestly when a capability
               (mic/net/location capture) needs native code it doesn&apos;t ship. New enrollments raise an info alert
               and appear in Devices automatically.
+            </>
+          ) : track === 'python' ? (
+            <>
+              Official Windows agent: multi-monitor/camera/mic capture + offline encrypted recordings, code
+              protected with PyFortress. Built into <code className="font-mono text-[11px]">dist_agent/</code> so the
+              deployed bundle is encrypted and obfuscated.
             </>
           ) : (
             <>
@@ -634,7 +661,7 @@ export default function SettingsView() {
             </div>
             <div className="min-w-0 flex-1">
               <h3 className="font-semibold leading-tight">
-                About <span className="text-gradient">SentraRMM v0.2.0</span>
+                About <span className="text-gradient">SentraRMM v0.3.0</span>
               </h3>
               <p className="mt-1 text-sm text-muted-foreground">
                 Open-source, authorized-use RMM for your own fleet and security assessments.

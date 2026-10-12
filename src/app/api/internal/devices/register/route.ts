@@ -1,5 +1,5 @@
 // POST /api/internal/devices/register  (hub → api, x-hub-token)
-// body: AgentInfo → Device (upsert by agentId; alert on first enrollment)
+// body: AgentInfo (+ captures?: CaptureCapabilities) → Device (upsert by agentId; alert on first enrollment)
 import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
@@ -31,6 +31,33 @@ export async function POST(req: NextRequest) {
       ? (String(body.deviceType) as (typeof DEVICE_TYPES)[number])
       : "workstation";
     const publicIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+    // CaptureCapabilities (monitors/cameras/mics/shells) — validated + persisted so the
+    // dashboard can plan captures even while the device is offline.
+    let captures: unknown = null;
+    if (body.captures && typeof body.captures === "object" && !Array.isArray(body.captures)) {
+      const c = body.captures as Record<string, unknown>;
+      const idNameList = (v: unknown): { id: string; name: string }[] =>
+        Array.isArray(v)
+          ? v.filter(
+              (e): e is { id: string; name: string } =>
+                !!e && typeof e === "object" && typeof (e as { id?: unknown }).id === "string",
+            )
+          : [];
+      const monitors = idNameList(c.monitors).map((m, i) => ({
+        id: String(m.id),
+        name: String(m.name ?? `Display ${i + 1}`),
+        width: Math.round(Number((m as { width?: unknown }).width)) || 0,
+        height: Math.round(Number((m as { height?: unknown }).height)) || 0,
+        primary: (m as { primary?: unknown }).primary === true || i === 0,
+      }));
+      captures = {
+        monitors,
+        cameras: idNameList(c.cameras),
+        mics: idNameList(c.mics),
+        shells: Array.isArray(c.shells) ? c.shells.filter((s): s is string => typeof s === "string") : [],
+        ...(Array.isArray(c.notes) ? { notes: c.notes.filter((n): n is string => typeof n === "string") } : {}),
+      };
+    }
 
     const base = {
       hostname,
@@ -59,6 +86,7 @@ export async function POST(req: NextRequest) {
             ...(Array.isArray(body.tags)
               ? { tags: JSON.stringify(body.tags.map((t) => String(t))) }
               : {}),
+            ...(captures ? { captures } : {}),
             ...(publicIp ? { ipAddress: publicIp } : {}),
           },
         })
@@ -68,6 +96,7 @@ export async function POST(req: NextRequest) {
             ...base,
             friendlyName: typeof body.friendlyName === "string" ? body.friendlyName : null,
             tags: JSON.stringify(Array.isArray(body.tags) ? body.tags.map((t) => String(t)) : []),
+            ...(captures ? { captures } : {}),
             ipAddress: publicIp,
           },
         });

@@ -39,32 +39,63 @@ model Device {
   locationLabel  String? // "Manzini, SZ" etc
   notes          String?
   maintenance    Boolean   @default(false) // maintenance window — alerts suppressed
+  captures       Json? // CaptureCapabilities reported at agent:register (monitors/cameras/mics/shells)
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  commands         CommandExecution[]
-  mediaAssets      MediaAsset[]
-  networkCaptures  NetworkCapture[]
-  locationPings    LocationPing[]
-  fileOperations   FileOperation[]
-  processSnapshots ProcessSnapshot[]
+  commands          CommandExecution[]
+  mediaAssets       MediaAsset[]
+  networkCaptures   NetworkCapture[]
+  locationPings     LocationPing[]
+  fileOperations    FileOperation[]
+  processSnapshots  ProcessSnapshot[]
+  recordings        RecordingArtifact[]
 }
 
 // ───────────────────────── Command execution ────────────────────────
 
 model CommandExecution {
-  id          String    @id @default(cuid())
-  deviceId    String
-  device      Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  command     String
-  output      String?
-  status      String    @default("pending") // pending | running | completed | failed | timeout
-  exitCode    Int?
-  durationMs  Int?
-  shell       String    @default("powershell")
-  createdBy   String    @default("admin")
-  createdAt   DateTime  @default(now())
-  completedAt DateTime?
+  id             String    @id @default(cuid())
+  deviceId       String
+  device         Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  command        String
+  output         String?
+  status         String    @default("pending") // pending | running | completed | failed | timeout
+  exitCode       Int?
+  durationMs     Int?
+  shell          String    @default("powershell") // requested shell (powershell | cmd | auto)
+  effectiveShell String? // shell actually used by the agent ("powershell" | "cmd" | "bash")
+  createdBy      String    @default("admin")
+  createdAt      DateTime  @default(now())
+  completedAt    DateTime?
+
+  @@index([deviceId, createdAt])
+}
+
+// ─────────────────────── Scheduled recordings ───────────────────────
+
+model RecordingArtifact {
+  id             String    @id @default(cuid())
+  recordingId    String    @unique // dashboard-generated id shared with the agent
+  deviceId       String
+  device         Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  label          String?
+  durationSec    Int
+  sources        String? // JSON { monitors?: string[], cameras?: string[], mics?: string[] }
+  state          String    @default("armed") // armed | recording | completed | failed | canceled
+  fileName       String? // <recordingId>.enc
+  sizeBytes      Int?
+  sha256         String? // integrity hash of the uploaded .enc file
+  encryption     String    @default("AES-256-GCM")
+  kdf            String    @default("PBKDF2-HMAC-SHA256")
+  kdfIterations  Int       @default(200000)
+  keyFingerprint String? // first 12 hex chars of sha256(passphrase) — never the passphrase
+  frames         Int?
+  error          String?
+  startedAt      DateTime?
+  endedAt        DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   @@index([deviceId, createdAt])
 }

@@ -1,32 +1,45 @@
 #!/usr/bin/env node
 // ─────────────────────────────────────────────────────────────────────────────
-// SentraRMM reference agent v0.2.0
+// SentraRMM reference agent v0.3.0
 //
 // A TRANSPARENT remote-management client. It speaks the exact same socket.io
 // protocol as the simulated fleet bundled with the SentraRMM hub:
 //
-//   agent:register { info }                    → registers the device
+//   agent:register { info, captures }          → registers the device
 //   agent:heartbeat { agentId, metrics, loc }  → telemetry every N seconds
 //   agent:request { requestId, type, payload } → hub-initiated operations
 //   agent:reply    { requestId, ok, data }     → operation result
-//   agent:event    { name, payload }           → screen:frame live stream
+//   agent:event    { name, payload }           → stream:frame / screen:frame
+//   record:status / record:chunk / record:manifest (socket acks)
 //
 // Supported request types (real implementations, no simulation):
-//   exec                 — run a shell command (PowerShell on Windows)
+//   exec                 — run a shell command (shell: powershell | cmd | auto
+//                          on Windows, bash on POSIX; the reply always reports
+//                          the effective shell used)
 //   ps:list / ps:action  — running processes + kill/suspend/resume
 //   fs:list / fs:download / fs:upload / fs:delete / fs:rename / fs:mkdir
 //                        — file operations, scoped to --root (default: home)
 //   media:screenshot     — real screen capture on Windows (PowerShell + GDI+)
-//   screen:live:start|stop — periodic screenshot frames over agent:event
+//   screen:live:start|stop — legacy periodic screenshot frames (agent:event)
+//   stream:start|stop    — v0.3 multi-source streams; screen only on Windows,
+//                          sourceId must be the primary monitor (multi-monitor
+//                          needs the Python agent)
+//   record:schedule|cancel — v0.3 scheduled screen recording (Windows only):
+//                          2 fps screenshots sealed as a SENTRA-REC-1 artifact
+//                          (AES-256-GCM, PBKDF2-HMAC-SHA256 200k iterations)
+//                          uploaded in ordered, acked record:chunk events; the
+//                          upload survives hub disconnects (chunks buffer).
 //
 // HONEST LIMITATIONS (the agent reports an explicit error, never fakes data):
-//   media:record, net:start/stop and location:fix need native capture stack
-//   (WASAPI / pktcap / OS geolocation) that this reference agent does not ship.
+//   camera/mic streaming, multi-monitor streaming, media:record, net:start/stop
+//   and location:fix need the Python agent (agent-python) or a native capture
+//   stack that this reference agent does not ship.
 //
 // This agent is designed to be SEEN: it prints a visible banner, keeps a
-// console window, and briefly flashes a PowerShell window when remote
-// commands run (disable with --hidden-exec). It registers itself in the
-// operator's device list and the device user can close it at any time.
+// console window, briefly flashes a shell window when remote commands run
+// (disable with --hidden-exec), announces scheduled recordings and shows the
+// recording activity in its console. It registers itself in the operator's
+// device list and the device user can close it at any time.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { io } from "socket.io-client";
@@ -37,7 +50,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const AGENT_VERSION = "0.2.0";
+const AGENT_VERSION = "0.3.0";
 const IS_WIN = process.platform === "win32";
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
@@ -349,17 +362,40 @@ function sh(command, timeoutMs = EXEC_TIMEOUT_MS) {
   });
 }
 
-/** Run a remote command exactly like the terminal view expects. */
-function execCommand(command, hiddenExec) {
+/** Run a remote command exactly like the terminal view expects (v0.3 shell selection). */
+let powershellAvailable = IS_WIN ? undefined : false;
+async function hasPowerShell() {
+  if (!IS_WIN) return false;
+  if (powershellAvailable !== undefined) return powershellAvailable;
+  powershellAvailable = await new Promise((resolve) => {
+    const child = spawn("where.exe", ["powershell.exe"], { windowsHide: true, timeout: 4000 });
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+  });
+  return powershellAvailable;
+}
+
+function execCommand(command, shell, hiddenExec) {
   return new Promise((resolve) => {
     const started = Date.now();
-    const child = IS_WIN
-      ? spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command], {
-          // Transparency: the PowerShell window is visible on the device by
-          // default so users SEE remote activity. --hidden-exec disables it.
-          windowsHide: hiddenExec === true,
-        })
-      : spawn("/bin/bash", ["-lc", command]);
+    let child;
+    let effective;
+    if (IS_WIN) {
+      effective = shell === "cmd" ? "cmd" : shell === "auto" ? (powershellAvailable ? "powershell" : "cmd") : "powershell";
+      child =
+        effective === "cmd"
+          ? spawn("cmd.exe", ["/d", "/s", "/c", command], {
+              // Transparency: the console window is visible on the device by
+              // default so users SEE remote activity. --hidden-exec disables it.
+              windowsHide: hiddenExec === true,
+            })
+          : spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command], {
+              windowsHide: hiddenExec === true,
+            });
+    } else {
+      effective = "bash"; // POSIX: bash regardless of the requested shell (reported honestly)
+      child = spawn("/bin/bash", ["-lc", command]);
+    }
 
     let out = "";
     let killed = false;
@@ -381,7 +417,7 @@ function execCommand(command, hiddenExec) {
     });
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ output: out + `\n[spawn error] ${err.message}`, exitCode: 1, durationMs: Date.now() - started });
+      resolve({ output: out + `\n[spawn error] ${err.message}`, exitCode: 1, durationMs: Date.now() - started, shell: effective });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -393,6 +429,7 @@ function execCommand(command, hiddenExec) {
         output: killed ? text + `\n[timeout after ${EXEC_TIMEOUT_MS / 1000}s — process terminated]` : text,
         exitCode: killed ? 124 : (code ?? 0),
         durationMs: Date.now() - started,
+        shell: effective,
       });
     });
   });
@@ -598,6 +635,302 @@ $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
   throw new Error("Screen capture is implemented for Windows (GDI+); on this platform no capture backend was found");
 }
 
+// ── capture capabilities (v0.3) ──────────────────────────────────────────
+// Enumerated once at startup and sent with agent:register (info.captures) so
+// the console can plan captures even while the device is offline. Honest
+// everywhere: sources this agent cannot capture are simply not listed.
+let capturesCache = null;
+async function collectCaptures() {
+  if (capturesCache) return capturesCache;
+  if (!IS_WIN) {
+    capturesCache = {
+      monitors: [],
+      cameras: [],
+      mics: [],
+      shells: [],
+      notes: [
+        "exec uses /bin/bash on this platform",
+        "monitor/camera/mic enumeration and capture require the Python agent (agent-python)",
+      ],
+    };
+    return capturesCache;
+  }
+  const raw = [];
+  try {
+    const out = await sh(
+      'powershell.exe -NoProfile -NonInteractive -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { \\"{0}|{1}|{2}|{3}\\" -f $_.Bounds.Width, $_.Bounds.Height, $_.Primary, $_.DeviceName }"',
+      6000,
+    );
+    for (const line of out.trim().split("\n")) {
+      const [w, h, primary, device] = line.trim().split("|");
+      if (!w || !h) continue;
+      raw.push({ width: Number(w) || 0, height: Number(h) || 0, primary: String(primary).trim().toLowerCase() === "true", device: String(device ?? "").trim() });
+    }
+  } catch {
+    /* enumeration failed — the console gets an empty monitor list + note */
+  }
+  raw.sort((a, b) => Number(b.primary) - Number(a.primary)); // primary display first
+  capturesCache = {
+    monitors: raw.map((m, i) => ({
+      id: `monitor:${i}`,
+      name: `Display ${i + 1}${m.primary ? " (primary)" : ""}${m.device ? ` — ${m.device}` : ""}`,
+      width: m.width,
+      height: m.height,
+      primary: m.primary,
+    })),
+    cameras: [],
+    mics: [],
+    shells: ["powershell", "cmd"],
+    notes: [
+      "camera/mic capture requires the Python agent (agent-python)",
+      "multi-monitor capture requires the Python agent (agent-python)",
+    ],
+  };
+  return capturesCache;
+}
+
+/** Only the primary display (monitor:0 by enumeration convention) streams here. */
+function screenStreamAllowed(sourceId) {
+  return sourceId === null || sourceId === undefined || sourceId === "" || sourceId === "monitor:0";
+}
+
+// ── v0.3 scheduled screen recording (Windows; SENTRA-REC-1 artifact) ─────
+// Produces a REAL encrypted artifact: a JSON header line, then per-frame
+// records sealed with AES-256-GCM exactly per the frozen contract in
+// src/lib/types.ts. Frames accumulate in memory and are uploaded as ordered,
+// acked record:chunk events (≤256KB payload each); if the hub is unreachable
+// the recording CONTINUES and buffered chunks flush on reconnect.
+const RECORD_CHUNK_BYTES = 180 * 1024; // upload chunk size (base64 ≤ 256KB payload)
+const RECORD_ARM_DELAY_MS = 3_000;
+const RECORD_FRAME_MS = 500; // 2 fps screenshot loop
+const RECORD_STATUS_MS = 5_000;
+const RECORD_FLUSH_MS = 1_000;
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+class ScreenRecorder {
+  constructor(deps) {
+    // deps: { socket, agentId, recordingId, durationSec, passphrase, label, sourceId }
+    this.deps = deps;
+    this.salt = crypto.randomBytes(16);
+    this.key = crypto.pbkdf2Sync(deps.passphrase, this.salt, 200_000, 32, "sha256");
+    this.aad = crypto.createHash("sha256").update(deps.recordingId).digest().subarray(0, 16);
+    this.hash = crypto.createHash("sha256");
+    this.totalBytes = 0;
+    this.frames = 0;
+    this.nextSeq = 0;
+    this.pending = [];
+    this.pendingBytes = 0;
+    this.uploading = false;
+    this.shotBusy = false;
+    this.state = "armed";
+    this.startedAt = 0;
+    this.timers = [];
+    this.done = false;
+  }
+
+  arm() {
+    // TRANSPARENCY (contract, non-optional): the armed recording was announced
+    // on the console at schedule time; the recording loop below keeps the
+    // activity visible in the agent window the whole time.
+    this.timers.push(setTimeout(() => this.start(), RECORD_ARM_DELAY_MS));
+  }
+
+  start() {
+    if (this.state !== "armed") return;
+    this.state = "recording";
+    this.startedAt = Date.now();
+    const d = this.deps;
+    const header = Buffer.from(
+      `${JSON.stringify({
+        magic: "SENTRA-REC-1",
+        cipher: "AES-256-GCM",
+        kdf: "PBKDF2-HMAC-SHA256",
+        iterations: 200000,
+        salt: this.salt.toString("base64"),
+        agentId: d.agentId,
+        ...(d.label ? { label: d.label } : {}),
+        durationSec: d.durationSec,
+        sources: [d.sourceId],
+        startedAt: this.startedAt,
+      })}\n`,
+      "utf8",
+    );
+    this.push(header);
+    console.log(`[AGENT] recording ${d.recordingId} started — on-device indicator visible (${d.durationSec}s)`);
+    void this.status({ state: "recording", startedAt: new Date(this.startedAt).toISOString() });
+    this.timers.push(setInterval(() => void this.captureFrame(), RECORD_FRAME_MS));
+    this.timers.push(setInterval(() => void this.flush(), RECORD_FLUSH_MS));
+    this.timers.push(
+      setInterval(() => {
+        void this.status({
+          state: "recording",
+          elapsedSec: Math.round((Date.now() - this.startedAt) / 1000),
+          sizeBytes: this.totalBytes,
+          frames: this.frames,
+        });
+      }, RECORD_STATUS_MS),
+    );
+    this.timers.push(setTimeout(() => void this.finalize("completed"), d.durationSec * 1000));
+    void this.flush();
+  }
+
+  async captureFrame() {
+    if (this.shotBusy || this.state !== "recording") return;
+    this.shotBusy = true;
+    try {
+      const shot = await captureScreen();
+      const b64 = String(shot.dataUri).replace(/^data:image\/[a-z+]+;base64,/, "");
+      this.addRecord({ t: Date.now(), kind: "screen", sourceId: this.deps.sourceId, mime: "image/png", dataB64: b64 });
+    } catch (err) {
+      console.error(`[AGENT] recording frame failed: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      this.shotBusy = false;
+    }
+  }
+
+  push(buf) {
+    this.hash.update(buf);
+    this.totalBytes += buf.length;
+    this.pending.push(buf);
+    this.pendingBytes += buf.length;
+  }
+
+  addRecord(obj) {
+    const plaintext = Buffer.from(JSON.stringify(obj), "utf8");
+    const nonce = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", this.key, nonce);
+    cipher.setAAD(this.aad);
+    const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const body = Buffer.concat([nonce, ct, cipher.getAuthTag()]);
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(body.length, 0);
+    this.push(Buffer.concat([len, body]));
+    this.frames += 1;
+  }
+
+  async flush(force = false) {
+    if (this.uploading || this.state === "armed" || this.done) return;
+    if (this.pending.length === 0) return;
+    this.uploading = true;
+    try {
+      while (this.pending.length > 0 && (force || this.pendingBytes >= RECORD_CHUNK_BYTES)) {
+        const ok = await this.sendNextChunk();
+        if (!ok) return;
+      }
+    } finally {
+      this.uploading = false;
+    }
+  }
+
+  async sendNextChunk() {
+    const parts = [];
+    let size = 0;
+    while (this.pending.length > 0 && size < RECORD_CHUNK_BYTES) {
+      const b = this.pending.shift();
+      parts.push(b);
+      size += b.length;
+    }
+    const chunk = Buffer.concat(parts);
+    const seq = this.nextSeq;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (!this.deps.socket.connected) break;
+      try {
+        const ack = await this.deps.socket.timeout(8000).emitWithAck("record:chunk", {
+          recordingId: this.deps.recordingId,
+          seq,
+          dataB64: chunk.toString("base64"),
+        });
+        if (ack?.ok) {
+          this.nextSeq += 1;
+          this.pendingBytes -= size;
+          return true;
+        }
+        console.error(`[AGENT] record:chunk seq=${seq} rejected: ${ack?.error ?? "unknown"}`);
+      } catch {
+        /* ack timeout / transport error — retry */
+      }
+      await sleepMs(400);
+    }
+    this.pending.unshift(chunk); // stays buffered; retried on reconnect/next flush
+    return false;
+  }
+
+  async status(fields, attempts = 2) {
+    for (let i = 0; i < attempts; i++) {
+      if (!this.deps.socket.connected) return;
+      try {
+        const ack = await this.deps.socket.timeout(6000).emitWithAck("record:status", {
+          recordingId: this.deps.recordingId,
+          ...fields,
+        });
+        if (ack?.ok) return;
+      } catch {
+        /* hub busy — retry */
+      }
+      await sleepMs(800);
+    }
+  }
+
+  async finalize(finalState) {
+    if (this.state === "finalizing" || this.done) return;
+    this.state = "finalizing";
+    for (const t of this.timers) {
+      clearTimeout(t);
+      clearInterval(t);
+    }
+    this.timers.length = 0;
+    const d = this.deps;
+    const endedAt = new Date().toISOString();
+    for (let i = 0; i < 10 && this.pending.length > 0; i++) {
+      await this.flush(true);
+      if (this.pending.length > 0) await sleepMs(1500);
+    }
+    const sizeBytes = this.totalBytes;
+    const sha256 = this.hash.digest("hex");
+    const fileName = `${d.recordingId}.enc`;
+    let manifestOk = false;
+    for (let attempt = 1; attempt <= 3 && !manifestOk; attempt++) {
+      if (!d.socket.connected) {
+        await sleepMs(1200);
+        continue;
+      }
+      try {
+        const ack = await d.socket.timeout(8000).emitWithAck("record:manifest", { recordingId: d.recordingId, fileName, sizeBytes, sha256 });
+        if (ack?.ok) manifestOk = true;
+        else console.error(`[AGENT] record:manifest rejected (attempt ${attempt}): ${ack?.error ?? "unknown"}`);
+      } catch (e) {
+        console.error(`[AGENT] record:manifest failed (attempt ${attempt}): ${e instanceof Error ? e.message : e}`);
+      }
+      if (!manifestOk) await sleepMs(1200);
+    }
+    await this.status({ state: finalState, endedAt, sizeBytes, frames: this.frames }, 3);
+    this.done = true;
+    console.log(
+      `[AGENT] recording ${d.recordingId} ${finalState} — ${sizeBytes} bytes, ${this.frames} frames, sha256 ${sha256.slice(0, 12)}…${manifestOk ? "" : " (upload incomplete — buffered locally)"}`,
+    );
+  }
+
+  cancel() {
+    if (this.state === "armed") {
+      for (const t of this.timers) {
+        clearTimeout(t);
+        clearInterval(t);
+      }
+      this.timers.length = 0;
+      this.state = "canceled";
+      this.done = true;
+      console.log(`[AGENT] recording ${this.deps.recordingId} canceled before start — on-device notice cleared`);
+      void this.status({ state: "canceled", endedAt: new Date().toISOString() });
+      return;
+    }
+    if (this.state === "recording") {
+      console.log(`[AGENT] recording ${this.deps.recordingId} canceled by the operator — sealing artifact`);
+      void this.finalize("canceled");
+    }
+  }
+}
+
 // ── main ─────────────────────────────────────────────────────────────────
 async function main() {
   const cfg = loadConfig(parseArgs(process.argv));
@@ -606,8 +939,9 @@ async function main() {
     return;
   }
   const info = await buildAgentInfo(cfg);
+  const captures = await collectCaptures();
   if (cfg.printInfo) {
-    console.log(JSON.stringify(info, null, 2));
+    console.log(JSON.stringify({ ...info, captures }, null, 2));
     return;
   }
 
@@ -622,7 +956,12 @@ async function main() {
   console.log("└──────────────────────────────────────────────────────────┘");
   console.log(`[AGENT] v${AGENT_VERSION} → hub ${cfg.hub}`);
   console.log(`[AGENT] device ${info.hostname} (${info.osName} ${info.osVersion}, ${info.cpuCores} cores, ${info.totalMemoryMB}MB)`);
-  console.log(`[AGENT] agentId ${info.agentId}  tags=[${info.tags.join(", ")}]  fileScope=${files.root}`);
+  console.log(
+    `[AGENT] agentId ${info.agentId}  tags=[${info.tags.join(", ")}]  fileScope=${files.root}`,
+  );
+  console.log(
+    `[AGENT] captures: ${captures.monitors.length} monitor(s), ${captures.cameras.length} camera(s), ${captures.mics.length} mic(s) — shells: ${captures.shells.join(", ") || "bash"}`,
+  );
 
   const socket = io(cfg.hub, {
     path: "/",
@@ -630,14 +969,33 @@ async function main() {
     transports: ["websocket", "polling"],
   });
 
+  // v0.3 multi-source streams (any number simultaneous) + scheduled recordings.
+  // The Node reference agent streams the SCREEN kind only — camera/mic and
+  // multi-monitor capture get an honest error pointing at agent-python.
+  const streams = new Map(); // streamId → { seq, timer, fps }
+  const recordings = new Map(); // recordingId → ScreenRecorder
+
   socket.on("connect", () => {
     console.log(`[AGENT] connected to hub (socket ${socket.id})`);
-    socket.emit("agent:register", { info }, (ack) => {
+    socket.emit("agent:register", { info: { ...info, captures } }, (ack) => {
       if (ack?.ok) console.log("[AGENT] registered — device should now appear in the console");
       else console.error("[AGENT] registration rejected:", ack?.error ?? "unknown error");
     });
+    // v0.3: a recording may have buffered chunks while the hub was down.
+    for (const rec of recordings.values()) {
+      if (!rec.done && rec.state === "recording") void rec.flush(true);
+    }
   });
-  socket.on("disconnect", (reason) => console.log(`[AGENT] disconnected (${reason}) — reconnecting`));
+  socket.on("disconnect", (reason) => {
+    console.log(`[AGENT] disconnected (${reason}) — reconnecting`);
+    // v0.3 contract: agents stop all streams when they disconnect. Recordings
+    // KEEP RUNNING — chunks stay buffered in memory and flush on reconnect.
+    for (const [streamId, stream] of streams) {
+      clearInterval(stream.timer);
+      streams.delete(streamId);
+      console.log(`[AGENT] stream ${streamId.slice(0, 8)}… stopped (hub disconnect)`);
+    }
+  });
   socket.on("connect_error", (err) => console.error(`[AGENT] hub connection error: ${err.message}`));
 
   // heartbeat loop
@@ -654,10 +1012,12 @@ async function main() {
 
   // request handlers
   const handlers = {
-    exec: (p) => {
+    exec: async (p) => {
       const cmd = String(p.command ?? "");
-      console.log(`[AGENT] exec: ${cmd}`);
-      return execCommand(cmd, cfg.hiddenExec);
+      const shell = String(p.shell ?? "powershell");
+      if (shell === "auto" && IS_WIN) await hasPowerShell(); // resolve "auto" before choosing
+      console.log(`[AGENT] exec (${shell}): ${cmd}`);
+      return execCommand(cmd, shell, cfg.hiddenExec);
     },
     "ps:list": async () => ({
       processes: IS_WIN ? await listProcessesWindows() : await listProcessesPosix(),
@@ -689,7 +1049,111 @@ async function main() {
     },
   };
 
-  let live = null; // { timer, seq }
+  let live = null; // { timer, seq } — legacy screen:live channel
+  const startStream = (p) => {
+    const streamId = String(p.streamId ?? "");
+    if (!streamId) throw new Error("streamId is required");
+    const kind = String(p.kind ?? "");
+    if (kind !== "screen") {
+      throw new Error(
+        kind === "camera" || kind === "mic"
+          ? "camera/mic streaming is not implemented in the reference agent — use the Python agent (agent-python)"
+          : "kind must be one of: screen, camera, mic",
+      );
+    }
+    const sourceId = p.sourceId == null || p.sourceId === "" ? null : String(p.sourceId);
+    if (!screenStreamAllowed(sourceId)) {
+      throw new Error("multi-monitor capture requires the Python agent (agent-python) — only the primary display streams here");
+    }
+    if (streams.has(streamId)) throw new Error(`Stream '${streamId}' is already running`);
+    const fps = Math.min(5, Math.max(0.5, Number(p.fps) > 0 ? Number(p.fps) : 2));
+    const mon = captures.monitors[0];
+    const stream = { streamId, seq: 0, timer: setInterval(() => void pushStreamFrame(stream), Math.round(1000 / fps)) };
+    streams.set(streamId, stream);
+    console.log(`[AGENT] stream ${streamId.slice(0, 8)}… screen started (${fps} fps, primary display)`);
+    return {
+      started: true,
+      meta: { width: mon?.width ?? 0, height: mon?.height ?? 0, fps, sourceId: "monitor:0" },
+    };
+  };
+
+  const pushStreamFrame = async (stream) => {
+    if (!socket.connected) return;
+    if (!streams.has(stream.streamId)) return;
+    try {
+      stream.seq += 1;
+      const shot = await captureScreen();
+      socket.emit("agent:event", {
+        name: "stream:frame",
+        payload: {
+          agentId: info.agentId,
+          streamId: stream.streamId,
+          kind: "screen",
+          dataUri: shot.dataUri,
+          ts: Date.now(),
+          seq: stream.seq,
+          width: captures.monitors[0]?.width ?? 0,
+          height: captures.monitors[0]?.height ?? 0,
+        },
+      });
+    } catch (err) {
+      console.error(`[AGENT] stream frame failed: ${err instanceof Error ? err.message : err}`);
+    }
+  };
+
+  const stopStream = (p) => {
+    const streamId = String(p.streamId ?? "");
+    const stream = streams.get(streamId);
+    if (!stream) return { frames: 0 };
+    clearInterval(stream.timer);
+    streams.delete(streamId);
+    console.log(`[AGENT] stream ${streamId.slice(0, 8)}… stopped (${stream.seq} frames)`);
+    return { frames: stream.seq };
+  };
+
+  const scheduleRecording = (p) => {
+    const recordingId = String(p.recordingId ?? "");
+    if (!recordingId) throw new Error("recordingId is required");
+    const passphrase = String(p.passphrase ?? "");
+    if (!passphrase) throw new Error("passphrase is required");
+    if (!IS_WIN) {
+      throw new Error(
+        "scheduled recordings are implemented on Windows only in the reference agent (GDI+ screen capture) — use the Python agent (agent-python) on this platform",
+      );
+    }
+    if (recordings.has(recordingId)) throw new Error(`Recording '${recordingId}' already exists`);
+    const durationSec = Math.max(5, Math.round(Number(p.durationSec) || 0));
+    const label = typeof p.label === "string" && p.label.trim() !== "" ? p.label.trim() : null;
+    const monitors = Array.isArray(p.monitors) ? p.monitors.filter((m) => typeof m === "string") : [];
+    const sourceId = monitors[0] ?? "monitor:0";
+    if (!screenStreamAllowed(sourceId)) {
+      throw new Error("multi-monitor recording requires the Python agent (agent-python) — only the primary display records here");
+    }
+    // TRANSPARENCY (contract, non-optional): announce the armed recording to
+    // the device user before it starts.
+    console.log("┌──────────────────────────────────────────────────────────┐");
+    console.log("│  SCHEDULED RECORDING ARMED BY THE ADMINISTRATOR          │");
+    console.log(`│  id ${recordingId}`);
+    console.log(`│  duration ${durationSec}s · source ${sourceId}${label ? ` · label: ${label}` : ""}`);
+    console.log(`│  ${String(p.noticeText ?? "A visible indicator will be shown while recording.").slice(0, 56)}`);
+    console.log("└──────────────────────────────────────────────────────────┘");
+    const rec = new ScreenRecorder({ socket, agentId: info.agentId, recordingId, durationSec, passphrase, label, sourceId });
+    recordings.set(recordingId, rec);
+    rec.arm();
+    return { accepted: true, state: "armed" };
+  };
+
+  const cancelRecording = (p) => {
+    const recordingId = String(p.recordingId ?? "");
+    const rec = recordings.get(recordingId);
+    if (!rec || rec.done) {
+      console.log(`[AGENT] record:cancel ${recordingId}: no active recording`);
+      return { ok: true, state: "idle" };
+    }
+    rec.cancel();
+    return { ok: true, state: "canceled" };
+  };
+
   socket.on("agent:request", (msg) => {
     if (!msg || typeof msg.requestId !== "string" || typeof msg.type !== "string") return;
     const payload = msg.payload ?? {};
@@ -710,6 +1174,10 @@ async function main() {
           live = null;
           return { frames };
         }
+        if (msg.type === "stream:start") return startStream(payload);
+        if (msg.type === "stream:stop") return stopStream(payload);
+        if (msg.type === "record:schedule") return scheduleRecording(payload);
+        if (msg.type === "record:cancel") return cancelRecording(payload);
         const h = handlers[msg.type];
         if (!h) throw new Error(`Unknown request type '${msg.type}'`);
         return h(payload);
@@ -742,6 +1210,11 @@ async function main() {
     console.log(`[AGENT] ${signal} received — disconnecting from hub`);
     clearInterval(beatTimer);
     if (live?.timer) clearInterval(live.timer);
+    for (const [, stream] of streams) clearInterval(stream.timer);
+    streams.clear();
+    for (const rec of recordings.values()) {
+      if (!rec.done) rec.cancel(); // visible: Ctrl+C stops any active recording
+    }
     socket.disconnect();
     process.exit(0);
   };

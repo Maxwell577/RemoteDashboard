@@ -1,5 +1,6 @@
 // POST /api/internal/commands/result  (hub → api, x-hub-token)
-// body: { commandId, status, output?, exitCode?, durationMs? } → { ok }
+// body: { commandId, status, output?, exitCode?, durationMs?, shell? } → { ok }
+//   shell = the effective shell the agent used → CommandExecution.effectiveShell
 import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { asIntOrNull, err, isNotFound, ok, readBody, verifyHubToken } from "@/lib/api-helpers";
@@ -17,6 +18,7 @@ export async function POST(req: NextRequest) {
       output?: string;
       exitCode?: number;
       durationMs?: number;
+      shell?: string;
     }>(req);
     if (!body?.commandId) return err("commandId is required", 400);
     if (!body.status || !(COMMAND_STATUSES as readonly string[]).includes(body.status)) {
@@ -31,6 +33,7 @@ export async function POST(req: NextRequest) {
         ...(typeof body.output === "string" ? { output: body.output } : {}),
         ...(asIntOrNull(body.exitCode) !== null ? { exitCode: asIntOrNull(body.exitCode) } : {}),
         ...(asIntOrNull(body.durationMs) !== null ? { durationMs: asIntOrNull(body.durationMs) } : {}),
+        ...(typeof body.shell === "string" && body.shell !== "" ? { effectiveShell: body.shell } : {}),
         ...(terminal ? { completedAt: new Date() } : {}),
       },
     });

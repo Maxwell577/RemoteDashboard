@@ -1,7 +1,8 @@
 // The three simulated Windows devices. `profile` tweaks the virtual
 // filesystem, process table, exec output and screenshot wallpaper.
+// v0.3: every sim reports CaptureCapabilities at register time.
 
-import type { AgentInfo, DeviceType } from "../../../src/lib/types";
+import type { AgentInfo, CaptureCapabilities, DeviceType } from "../../../src/lib/types";
 
 export type DeviceProfile = "work" | "home" | "server";
 
@@ -15,6 +16,8 @@ export interface SpawnSeed {
 export interface DeviceDef {
   profile: DeviceProfile;
   info: AgentInfo;
+  /** v0.3 capture capabilities reported in agent:register */
+  captures: CaptureCapabilities;
   userName: string;
   osBuild: string;
   cpuMhz: number;
@@ -58,6 +61,22 @@ const WORK: DeviceDef = {
     agentVersion: "1.2.0",
     deviceType: "workstation" as DeviceType,
     tags: ["work", "red-team"],
+  },
+  captures: {
+    monitors: [
+      { id: "monitor:0", name: "Display 1 (primary)", width: 1920, height: 1080, primary: true },
+      { id: "monitor:1", name: "Display 2", width: 2560, height: 1440, primary: false },
+    ],
+    cameras: [
+      { id: "camera:0", name: "Integrated Webcam" },
+      { id: "camera:1", name: "USB Capture Device" },
+    ],
+    mics: [
+      { id: "mic:0", name: "Microphone Array (Realtek)" },
+      { id: "mic:1", name: "USB Microphone" },
+    ],
+    shells: ["powershell", "cmd"],
+    notes: ["Simulated device — synthetic capture sources"],
   },
   userName: "tmasuku",
   osBuild: "10.0.22631.4460",
@@ -110,6 +129,22 @@ const HOME: DeviceDef = {
     deviceType: "workstation" as DeviceType,
     tags: ["home"],
   },
+  captures: {
+    monitors: [
+      { id: "monitor:0", name: "Display 1 (primary)", width: 1920, height: 1080, primary: true },
+      { id: "monitor:1", name: "Display 2", width: 2560, height: 1440, primary: false },
+    ],
+    cameras: [
+      { id: "camera:0", name: "Integrated Webcam" },
+      { id: "camera:1", name: "USB Capture Device" },
+    ],
+    mics: [
+      { id: "mic:0", name: "Microphone Array (Realtek)" },
+      { id: "mic:1", name: "USB Microphone" },
+    ],
+    shells: ["powershell", "cmd"],
+    notes: ["Simulated device — synthetic capture sources"],
+  },
   userName: "home",
   osBuild: "10.0.19045.5011",
   cpuMhz: 3700,
@@ -159,6 +194,22 @@ const SERVER: DeviceDef = {
     agentVersion: "1.2.0",
     deviceType: "server" as DeviceType,
     tags: ["lab", "blue-team"],
+  },
+  captures: {
+    monitors: [
+      { id: "monitor:0", name: "Display 1 (primary)", width: 1920, height: 1080, primary: true },
+      { id: "monitor:1", name: "Display 2", width: 2560, height: 1440, primary: false },
+    ],
+    cameras: [
+      { id: "camera:0", name: "Integrated Webcam" },
+      { id: "camera:1", name: "USB Capture Device" },
+    ],
+    mics: [
+      { id: "mic:0", name: "Microphone Array (Realtek)" },
+      { id: "mic:1", name: "USB Microphone" },
+    ],
+    shells: ["powershell", "cmd"],
+    notes: ["Simulated device — synthetic capture sources"],
   },
   userName: "Administrator",
   osBuild: "10.0.20348.2849",

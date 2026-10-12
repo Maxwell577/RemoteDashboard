@@ -13,12 +13,16 @@ export interface ExecContext {
   uptimeSec: number;
   cpuPercent: number;
   memPercent: number;
+  /** current directory for the CMD emulation (mutated by `cd`) */
+  cwd: string;
 }
 
 export interface ExecResult {
   output: string;
   exitCode: number;
   durationMs: number;
+  /** effective shell that produced this result (v0.3 contract) */
+  shell: "powershell" | "cmd";
 }
 
 // ── small text helpers ───────────────────────────────────────────────────
@@ -59,9 +63,11 @@ At line:1 char:1
     + FullyQualifiedErrorId : CommandNotFoundException`;
 }
 
-// ── command implementations ──────────────────────────────────────────────
+// ── command implementations ──────────────────────────────────────
+// (ipconfig / tasklist / netstat / sysinfo are exported for the CMD
+// emulation in ./cmd.ts, which reuses them with cmd-native framing)
 
-function sysinfo(ctx: ExecContext): string {
+export function sysinfo(ctx: ExecContext): string {
   const d = ctx.def;
   const total = d.info.totalMemoryMB;
   const avail = Math.max(1024, Math.round(total * (1 - ctx.memPercent / 100)));
@@ -112,7 +118,7 @@ function sysinfo(ctx: ExecContext): string {
   return lines.join("\n");
 }
 
-function ipconfig(ctx: ExecContext, showAll: boolean): string {
+export function ipconfig(ctx: ExecContext, showAll: boolean): string {
   const d = ctx.def;
   const mac = d.info.macAddress.replace(/:/g, "-");
   const lines: string[] = ["", "Windows IP Configuration", ""];
@@ -161,7 +167,7 @@ function ipconfig(ctx: ExecContext, showAll: boolean): string {
   return lines.join("\n").trimEnd();
 }
 
-function tasklist(ctx: ExecContext): string {
+export function tasklist(ctx: ExecContext): string {
   const rows = [
     "",
     `${w("Image Name", 25)}${wl("PID", 8)} ${w("Session Name", 16)}${w("Session#", 12)}${wl("Mem Usage", 12)}`,
@@ -256,7 +262,7 @@ function getNetIpAddress(ctx: ExecContext): string {
   return rows.join("\n").trimStart();
 }
 
-function netstat(ctx: ExecContext): string {
+export function netstat(ctx: ExecContext): string {
   const d = ctx.def;
   const ip = d.info.localIp;
   const rows = [
@@ -867,9 +873,9 @@ export async function runCommand(command: string, ctx: ExecContext): Promise<Exe
     output = notRecognized(trimmed);
     exitCode = 1;
     await sleep(rndInt(40, 140));
-    return { output, exitCode, durationMs: Date.now() - t0 };
+    return { output, exitCode, durationMs: Date.now() - t0, shell: "powershell" as const };
   }
 
   await sleep(rndInt(50, 400));
-  return { output, exitCode, durationMs: Date.now() - t0 };
+  return { output, exitCode, durationMs: Date.now() - t0, shell: "powershell" as const };
 }

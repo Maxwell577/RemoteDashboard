@@ -15,6 +15,7 @@ import {
   ArrowRight,
   Bell,
   Clapperboard,
+  Disc3,
   Download,
   History,
   LayoutDashboard,
@@ -34,6 +35,7 @@ import {
 import { toast } from 'sonner'
 import { useDash } from '@/lib/store'
 import { useTelemetryHistory } from '@/hooks/use-telemetry-history'
+import { useActiveRecordingCount } from '@/hooks/use-recordings'
 import { TelemetryChart } from '../telemetry-chart'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -184,6 +186,10 @@ export default function Overview() {
     refetchInterval: 20000,
   })
 
+  // armed + recording count (v0.3) — 0/absent while the route is deploying;
+  // the card only renders when something is actually active
+  const { activeCount: activeRecordings } = useActiveRecordingCount()
+
   const deviceList = devices ?? []
   const onlineDevices = deviceList.filter((d) => d.status === 'online')
   const onlineCount = stats?.onlineDevices ?? onlineDevices.length
@@ -303,7 +309,12 @@ export default function Overview() {
       />
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-6">
+      <div
+        className={cn(
+          'grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4',
+          activeRecordings > 0 ? 'xl:grid-cols-7' : 'xl:grid-cols-6',
+        )}
+      >
         {(
           [
             <StatCard
@@ -346,6 +357,16 @@ export default function Overview() {
               subtitle="packet captures live"
               tint="amber"
             />,
+            activeRecordings > 0 ? (
+              <StatCard
+                key="recordings"
+                icon={<Disc3 />}
+                label="Active recordings"
+                value={activeRecordings}
+                subtitle="armed + recording"
+                tint="rose"
+              />
+            ) : null,
             <StatCard
               key="alerts"
               icon={<Bell />}
@@ -363,15 +384,17 @@ export default function Overview() {
               }
             />,
           ] as const
-        ).map((card, i) => (
-          <div
-            key={i}
-            className="animate-in fade-in slide-in-from-bottom-3 fill-mode-both duration-500"
-            style={{ animationDelay: `${i * 70}ms` }}
-          >
-            {card}
-          </div>
-        ))}
+        ).map((card, i) =>
+          card ? (
+            <div
+              key={i}
+              className="animate-in fade-in slide-in-from-bottom-3 fill-mode-both duration-500"
+              style={{ animationDelay: `${i * 70}ms` }}
+            >
+              {card}
+            </div>
+          ) : null,
+        )}
       </div>
 
       {/* Live performance + devices at a glance */}

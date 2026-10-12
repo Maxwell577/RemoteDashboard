@@ -5,6 +5,7 @@ import {
   Bell,
   Clapperboard,
   Cpu,
+  Disc3,
   FolderTree,
   Keyboard,
   LayoutDashboard,
@@ -41,6 +42,7 @@ import Terminal from './views/terminal'
 import Files from './views/files'
 import Processes from './views/processes'
 import Media from './views/media'
+import Recordings from './views/recordings'
 import Network from './views/network'
 import Location from './views/location'
 import Alerts from './views/alerts'
@@ -55,7 +57,8 @@ const VIEWS: Record<ViewId, { label: string; component: ComponentType }> = {
   terminal: { label: 'Terminal', component: Terminal },
   files: { label: 'Files', component: Files },
   processes: { label: 'Processes', component: Processes },
-  media: { label: 'Media', component: Media },
+  media: { label: 'Streams', component: Media },
+  recordings: { label: 'Recordings', component: Recordings },
   network: { label: 'Network', component: Network },
   location: { label: 'Location', component: Location },
   alerts: { label: 'Alerts', component: Alerts },
@@ -82,7 +85,8 @@ const NAV: { group: string; items: { view: ViewId; label: string; icon: LucideIc
   {
     group: 'Capture',
     items: [
-      { view: 'media', label: 'Media', icon: Clapperboard },
+      { view: 'media', label: 'Streams', icon: Clapperboard },
+      { view: 'recordings', label: 'Recordings', icon: Disc3 },
       { view: 'network', label: 'Network', icon: RadioTower },
       { view: 'location', label: 'Location', icon: MapPin },
     ],
@@ -200,7 +204,7 @@ function SidebarFooter() {
     <div className="mt-auto flex flex-col gap-2">
       <HubPill />
       <p className="text-center text-[11px] text-muted-foreground">
-        v0.2.0 • open source
+        v0.3.0 • open source
       </p>
     </div>
   )

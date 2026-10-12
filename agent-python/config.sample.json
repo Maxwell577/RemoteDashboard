@@ -1,0 +1,9 @@
+{
+  "hubUrl": "http://127.0.0.1:3003",
+  "name": "Lab Workstation",
+  "tags": ["windows", "managed"],
+  "heartbeatSec": 15,
+  "recordingsDir": "recordings",
+  "maxRecordingMin": 60,
+  "minFreeMB": 500
+}

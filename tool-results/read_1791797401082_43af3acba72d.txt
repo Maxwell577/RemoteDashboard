@@ -1,0 +1,709 @@
+     1→     1→"""Scheduled encrypted recordings (v0.3 ``record:schedule`` family).
+     2→     2→
+     3→     3→Flow (state machine ``armed → recording → completed|failed|canceled``):
+     4→     4→
+     5→     5→1.  ``schedule`` validates durationSec (≤ maxRecordingMin*60) and free disk
+     6→     6→    space (≥ minFreeMB), NOTIFIES THE DEVICE USER (mandatory transparency,
+     7→     7→    using ``noticeText`` when provided) and acks ``{accepted: true, state}``.
+     8→     8→2.  A daemon job thread captures the selected sources — screen monitors at
+     9→     9→    2 fps (mss), cameras at 5 fps (OpenCV), mic levels at 4 Hz — and appends
+    10→    10→    plaintext JSON records to memory buffers.
+    11→    11→3.  ENCRYPT-THEN-WRITE: records are grouped into ≤64KB plaintext groups,
+    12→    12→    each group is AES-256-GCM encrypted and framed as
+    13→    13→    ``[u32BE len][12B nonce][ct][16B tag]`` (SENTRA-REC-1). Frames are BOTH
+    14→    14→    appended to the local ``<recordingId>.enc`` file (the offline-safe copy)
+    15→    15→    AND packed into ``record:chunk`` events (≤256KB payload, ordered seq,
+    16→    16→    ack'd; on failure/nack they go to a local spool flushed on reconnect).
+    17→    17→4.  On completion the file is sealed, sha256 computed, and ``record:manifest``
+    18→    18→    emitted. ``record:cancel`` stops early (state ``canceled``).
+    19→    19→
+    20→    20→The job runs in a daemon thread: losing the hub NEVER stops a recording.
+    21→    21→The passphrase is used for key derivation only and is never logged.
+    22→    22→"""
+    23→    23→from __future__ import annotations
+    24→    24→
+    25→    25→import base64
+    26→    26→import hashlib
+    27→    27→import io
+    28→    28→import json
+    29→    29→import logging
+    30→    30→import os
+    31→    31→import shutil
+    32→    32→import threading
+    33→    33→import time
+    34→    34→from typing import Any, Callable, Dict, List, Optional, Tuple
+    35→    35→
+    36→    36→log = logging.getLogger("sentra.recorder")
+    37→    37→
+    38→    38→MAGIC = "SENTRA-REC-1"
+    39→    39→CIPHER = "AES-256-GCM"
+    40→    40→KDF = "PBKDF2-HMAC-SHA256"
+    41→    41→KDF_ITERATIONS = 200000
+    42→    42→
+    43→    43→RECORD_FPS_SCREEN = 2.0
+    44→    44→RECORD_FPS_CAMERA = 5.0
+    45→    45→MIC_RECORD_HZ = 4
+    46→    46→GROUP_BYTES = 64 * 1024          # plaintext group size before encrypting
+    47→    47→CHUNK_TARGET = 240 * 1024        # pack frames into chunks up to this (b64)
+    48→    48→CHUNK_MAX = 256 * 1024           # hard contract cap per record:chunk payload
+    49→    49→MAX_JPEG_BYTES = 160 * 1024      # keeps base64(frame) safely inside a chunk
+    50→    50→ACK_TIMEOUT_S = 8.0
+    51→    51→MAX_CONCURRENT = 2
+    52→    52→
+    53→    53→
+    54→    54→def _aad_for(recording_id: str) -> bytes:
+    55→    55→    return hashlib.sha256(recording_id.encode("utf-8")).digest()[:16]
+    56→    56→
+    57→    57→
+    58→    58→def _derive_key(passphrase: str, salt: bytes) -> bytes:
+    59→    59→    return hashlib.pbkdf2_hmac(
+    60→    60→        "sha256", passphrase.encode("utf-8"), salt, KDF_ITERATIONS, dklen=32,
+    61→    61→    )
+    62→    62→
+    63→    63→
+    64→    64→def _fit_jpeg_b64_bgra(raw: Any, width: int, height: int) -> str:
+    65→    65→    """JPEG-encode an mss BGRA frame, shrinking quality/size to stay ≤ cap."""
+    66→    66→    import cv2  # type: ignore
+    67→    67→    import numpy as np  # type: ignore
+    68→    68→
+    69→    69→    arr = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 4))
+    70→    70→    img = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+    71→    71→    return _fit_jpeg_img(img)
+    72→    72→
+    73→    73→
+    74→    74→def _fit_jpeg_img(img: Any) -> str:
+    75→    75→    """Encode a BGR image, lowering quality then scaling until ≤ MAX_JPEG_BYTES."""
+    76→    76→    import cv2  # type: ignore
+    77→    77→
+    78→    78→    for quality in (70, 55, 40):
+    79→    79→        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    80→    80→        if ok and len(buf) <= MAX_JPEG_BYTES:
+    81→    81→            return base64.b64encode(buf.tobytes()).decode("ascii")
+    82→    82→    h, w = img.shape[:2]
+    83→    83→    scale = 0.75
+    84→    84→    while scale >= 0.3:
+    85→    85→        small = cv2.resize(img, (max(320, int(w * scale)), max(240, int(h * scale))))
+    86→    86→        ok, buf = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 45])
+    87→    87→        if ok and len(buf) <= MAX_JPEG_BYTES:
+    88→    88→            return base64.b64encode(buf.tobytes()).decode("ascii")
+    89→    89→        scale -= 0.15
+    90→    90→    # last resort — accept whatever we got at the smallest size
+    91→    91→    ok, buf = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 35])
+    92→    92→    return base64.b64encode((buf.tobytes() if ok else b"")).decode("ascii")
+    93→    93→
+    94→    94→
+    95→    95→class _RecordSink:
+    96→    96→    """Thread-safe record collector feeding the encryptor."""
+    97→    97→
+    98→    98→    def __init__(self) -> None:
+    99→    99→        self._pending: List[Dict[str, Any]] = []
+   100→   100→        self._lock = threading.Lock()
+   101→   101→
+   102→   102→    def add(self, record: Dict[str, Any]) -> None:
+   103→   103→        with self._lock:
+   104→   104→            self._pending.append(record)
+   105→   105→
+   106→   106→    def drain(self) -> List[Dict[str, Any]]:
+   107→   107→        with self._lock:
+   108→   108→            out = self._pending
+   109→   109→            self._pending = []
+   110→   110→            return out
+   111→   111→
+   112→   112→
+   113→   113→class _ChunkUploader:
+   114→   114→    """Sends record:chunk events with acks; spools failures for later flush."""
+   115→   115→
+   116→   116→    def __init__(self, recordings_dir: str,
+   117→   117→                 is_connected: Callable[[], bool],
+   118→   118→                 emit_chunk: Callable[[str, Dict[str, Any]], Tuple[bool, str]],
+   119→   119→                 emit_status: Callable[[Dict[str, Any]], None]) -> None:
+   120→   120→        self.spool_dir = os.path.join(recordings_dir, "spool")
+   121→   121→        try:
+   122→   122→            os.makedirs(self.spool_dir, exist_ok=True)
+   123→   123→        except OSError:
+   124→   124→            pass
+   125→   125→        self.is_connected = is_connected
+   126→   126→        self.emit_chunk = emit_chunk          # → (ok, error)
+   127→   127→        self.emit_status = emit_status
+   128→   128→        self._queue: "list[Tuple[str, int, bytes]]" = []
+   129→   129→        self._cv = threading.Condition()
+   130→   130→        self._stop = threading.Event()
+   131→   131→        self._thread = threading.Thread(target=self._loop, name="sentra-chunk-up", daemon=True)
+   132→   132→        self._thread.start()
+   133→   133→
+   134→   134→    # ------------------------------------------------------------------ api
+   135→   135→
+   136→   136→    def submit(self, recording_id: str, seq: int, payload: bytes) -> None:
+   137→   137→        with self._cv:
+   138→   138→            self._queue.append((recording_id, seq, payload))
+   139→   139→            self._cv.notify()
+   140→   140→
+   141→   141→    def flush_spool(self) -> int:
+   142→   142→        """Push all spooled chunks (ascending seq per recording). Returns sent count."""
+   143→   143→        sent = 0
+   144→   144→        try:
+   145→   145→            recs = sorted(os.listdir(self.spool_dir))
+   146→   146→        except OSError:
+   147→   147→            return 0
+   148→   148→        for rec_dir in recs:
+   149→   149→            rec_path = os.path.join(self.spool_dir, rec_dir)
+   150→   150→            if not os.path.isdir(rec_path):
+   151→   151→                continue
+   152→   152→            try:
+   153→   153→                chunks = sorted(os.listdir(rec_path))
+   154→   154→            except OSError:
+   155→   155→                continue
+   156→   156→            for name in chunks:
+   157→   157→                if self._stop.is_set():
+   158→   158→                    return sent
+   159→   159→                path = os.path.join(rec_path, name)
+   160→   160→                try:
+   161→   161→                    with open(path, "rb") as fh:
+   162→   162→                        payload = fh.read()
+   163→   163→                    seq = int(name.split(".")[0])
+   164→   164→                except (OSError, ValueError):
+   165→   165→                    continue
+   166→   166→                ok, _err = self.emit_chunk(rec_dir, {"recordingId": rec_dir, "seq": seq,
+   167→   167→                                                     "dataB64": base64.b64encode(payload).decode("ascii")})
+   168→   168→                if ok:
+   169→   169→                    try:
+   170→   170→                        os.remove(path)
+   171→   171→                        sent += 1
+   172→   172→                    except OSError:
+   173→   173→                        pass
+   174→   174→                else:
+   175→   175→                    return sent  # still offline — stop early, stay spooled
+   176→   176→        return sent
+   177→   177→
+   178→   178→    def stop(self) -> None:
+   179→   179→        self._stop.set()
+   180→   180→        with self._cv:
+   181→   181→            self._cv.notify()
+   182→   182→        self._thread.join(timeout=3.0)
+   183→   183→
+   184→   184→    # ----------------------------------------------------------------- loop
+   185→   185→
+   186→   186→    def _spool(self, recording_id: str, seq: int, payload: bytes) -> None:
+   187→   187→        rec_path = os.path.join(self.spool_dir, recording_id)
+   188→   188→        try:
+   189→   189→            os.makedirs(rec_path, exist_ok=True)
+   190→   190→            with open(os.path.join(rec_path, f"{seq:08d}.chunk"), "wb") as fh:
+   191→   191→                fh.write(payload)
+   192→   192→        except OSError as exc:
+   193→   193→            log.error("chunk spool write failed (%s seq=%d): %s", recording_id, seq, exc)
+   194→   194→
+   195→   195→    def _loop(self) -> None:
+   196→   196→        while not self._stop.is_set():
+   197→   197→            with self._cv:
+   198→   198→                if not self._queue:
+   199→   199→                    self._cv.wait(timeout=0.5)
+   200→   200→                item = self._queue.pop(0) if self._queue else None
+   201→   201→            if item is None:
+   202→   202→                continue
+   203→   203→            recording_id, seq, payload = item
+   204→   204→            if not self.is_connected():
+   205→   205→                self._spool(recording_id, seq, payload)
+   206→   206→                continue
+   207→   207→            ok, err = self.emit_chunk(recording_id, {
+   208→   208→                "recordingId": recording_id, "seq": seq,
+   209→   209→                "dataB64": base64.b64encode(payload).decode("ascii"),
+   210→   210→            })
+   211→   211→            if ok:
+   212→   212→                continue
+   213→   213→            log.warning("record:chunk %s seq=%d rejected (%s) — spooled for retry", recording_id, seq, err)
+   214→   214→            self._spool(recording_id, seq, payload)
+   215→   215→
+   216→   216→
+   217→   217→class RecordingJob(threading.Thread):
+   218→   218→    """One recording: capture threads → sink → encrypt → file + chunks."""
+   219→   219→
+   220→   220→    def __init__(self, spec: Dict[str, Any], agent_id: str, recordings_dir: str,
+   221→   221→                 uploader: _ChunkUploader, emit_status: Callable[[Dict[str, Any]], None],
+   222→   222→                 emit_manifest: Callable[[Dict[str, Any]], Tuple[bool, str]],
+   223→   223→                 transparency: Any, stop_event: threading.Event) -> None:
+   224→   224→        super().__init__(name=f"sentra-rec-{spec.get('recordingId', '?')[:8]}", daemon=True)
+   225→   225→        self.spec = spec
+   226→   226→        self.recording_id = str(spec["recordingId"])
+   227→   227→        self.duration_sec = int(spec.get("durationSec") or 0)
+   228→   228→        self.agent_id = agent_id
+   229→   229→        self.recordings_dir = recordings_dir
+   230→   230→        self.uploader = uploader
+   231→   231→        self.emit_status = emit_status
+   232→   232→        self.emit_manifest = emit_manifest
+   233→   233→        self.transparency = transparency
+   234→   234→        self.global_stop = stop_event
+   235→   235→
+   236→   236→        self.state = "armed"
+   237→   237→        self.error: Optional[str] = None
+   238→   238→        self.frames = 0
+   239→   239→        self.size_bytes = 0
+   240→   240→        self.started_at_ms: Optional[int] = None
+   241→   241→        self.ended_at_ms: Optional[int] = None
+   242→   242→        self._cancel = threading.Event()
+   243→   243→        self.sink = _RecordSink()
+   244→   244→        self.seq = 0
+   245→   245→
+   246→   246→        self.salt = os.urandom(16)
+   247→   247→        self.file_path = os.path.join(recordings_dir, f"{self.recording_id}.enc")
+   248→   248→        self.capture_threads: List[threading.Thread] = []
+   249→   249→
+   250→   250→    # ---------------------------------------------------------------- status
+   251→   251→
+   252→   252→    def status_msg(self) -> Dict[str, Any]:
+   253→   253→        msg: Dict[str, Any] = {
+   254→   254→            "recordingId": self.recording_id,
+   255→   255→            "state": self.state,
+   256→   256→            "frames": self.frames,
+   257→   257→        }
+   258→   258→        if self.state == "recording" and self.started_at_ms:
+   259→   259→            msg["elapsedSec"] = int((time.time() * 1000 - self.started_at_ms) / 1000)
+   260→   260→        if self.size_bytes:
+   261→   261→            msg["sizeBytes"] = self.size_bytes
+   262→   262→        if self.started_at_ms:
+   263→   263→            msg["startedAt"] = self.started_at_ms
+   264→   264→        if self.ended_at_ms:
+   265→   265→            msg["endedAt"] = self.ended_at_ms
+   266→   266→        if self.error:
+   267→   267→            msg["error"] = self.error
+   268→   268→        return msg
+   269→   269→
+   270→   270→    def cancel(self) -> None:
+   271→   271→        self._cancel.set()
+   272→   272→
+   273→   273→    # ------------------------------------------------------------- capture
+   274→   274→
+   275→   275→    def _selected(self, kind: str) -> List[str]:
+   276→   276→        val = self.spec.get(kind)
+   277→   277→        if val is None:
+   278→   278→            return []
+   279→   279→        if isinstance(val, str):
+   280→   280→            val = [val]
+   281→   281→        return [str(v) for v in val if v]
+   282→   282→
+   283→   283→    def _default_monitors(self, caps: Dict[str, Any]) -> List[str]:
+   284→   284→        mons = self._selected("monitors")
+   285→   285→        if mons:  # explicit selection (possibly empty → none)
+   286→   286→            return mons
+   287→   287→        for mon in caps.get("monitors", []):
+   288→   288→            if mon.get("primary"):
+   289→   289→                return [str(mon["id"])]
+   290→   290→        return []
+   291→   291→
+   292→   292→    def _capture_screen(self, monitor_ids: List[str]) -> None:
+   293→   293→        try:
+   294→   294→            import mss  # type: ignore
+   295→   295→        except Exception as exc:  # noqa: BLE001
+   296→   296→            self.sink.add({"t": int(time.time() * 1000), "kind": "meta",
+   297→   297→                           "event": "screen-unavailable", "error": str(exc)})
+   298→   298→            return
+   299→   299→        interval = 1.0 / RECORD_FPS_SCREEN
+   300→   300→        try:
+   301→   301→            with mss.mss() as sct:
+   302→   302→                monitors = list(sct.monitors)
+   303→   303→                for mon_id in monitor_ids:
+   304→   304→                    try:
+   305→   305→                        idx = int(str(mon_id).split(":", 1)[1])
+   306→   306→                    except (ValueError, IndexError):
+   307→   307→                        idx = 0
+   308→   308→                    mon = monitors[idx + 1] if idx + 1 < len(monitors) else (monitors[1] if len(monitors) > 1 else monitors[0])
+   309→   309→                    next_t = time.monotonic()
+   310→   310→                    while not self._cancel.is_set() and not self.global_stop.is_set() and self.state == "recording":
+   311→   311→                        shot = sct.grab(mon)
+   312→   312→                        data_b64 = _fit_jpeg_b64_bgra(shot.bgra, shot.width, shot.height)
+   313→   313→                        self.sink.add({
+   314→   314→                            "t": int(time.time() * 1000), "kind": "screen",
+   315→   315→                            "sourceId": mon_id, "mime": "image/jpeg", "dataB64": data_b64,
+   316→   316→                        })
+   317→   317→                        next_t += interval
+   318→   318→                        sleep = next_t - time.monotonic()
+   319→   319→                        if sleep > 0:
+   320→   320→                            time.sleep(sleep)
+   321→   321→                        else:
+   322→   322→                            next_t = time.monotonic()
+   323→   323→        except Exception as exc:  # noqa: BLE001 - degrade to honest meta note
+   324→   324→            self.sink.add({"t": int(time.time() * 1000), "kind": "meta",
+   325→   325→                           "event": "screen-capture-error", "error": str(exc)})
+   326→   326→
+   327→   327→    def _capture_camera(self, camera_ids: List[str]) -> None:
+   328→   328→        if not camera_ids:
+   329→   329→            return
+   330→   330→        try:
+   331→   331→            import cv2  # type: ignore
+   332→   332→        except Exception as exc:  # noqa: BLE001
+   333→   333→            self.sink.add({"t": int(time.time() * 1000), "kind": "meta",
+   334→   334→                           "event": "camera-unavailable", "error": str(exc)})
+   335→   335→            return
+   336→   336→        interval = 1.0 / RECORD_FPS_CAMERA
+   337→   337→        for cam_id in camera_ids:
+   338→   338→            try:
+   339→   339→                idx = int(str(cam_id).split(":", 1)[1])
+   340→   340→            except (ValueError, IndexError):
+   341→   341→                idx = 0
+   342→   342→            cap = cv2.VideoCapture(idx, getattr(cv2, "CAP_DSHOW", 0))
+   343→   343→            try:
+   344→   344→                if not cap.isOpened():
+   345→   345→                    self.sink.add({"t": int(time.time() * 1000), "kind": "meta",
+   346→   346→                                   "event": "camera-open-failed", "sourceId": cam_id})
+   347→   347→                    continue
+   348→   348→                next_t = time.monotonic()
+   349→   349→                while not self._cancel.is_set() and not self.global_stop.is_set() and self.state == "recording":
+   350→   350→                    ok, img = cap.read()
+   351→   351→                    if not ok:
+   352→   352→                        time.sleep(0.1)
+   353→   353→                        continue
+   354→   354→                    data_b64 = _fit_jpeg_img(img)
+   355→   355→                    self.sink.add({
+   356→   356→                        "t": int(time.time() * 1000), "kind": "camera",
+   357→   357→                        "sourceId": cam_id, "mime": "image/jpeg", "dataB64": data_b64,
+   358→   358→                    })
+   359→   359→                    next_t += interval
+   360→   360→                    sleep = next_t - time.monotonic()
+   361→   361→                    if sleep > 0:
+   362→   362→                        time.sleep(sleep)
+   363→   363→                    else:
+   364→   364→                        next_t = time.monotonic()
+   365→   365→            except Exception as exc:  # noqa: BLE001
+   366→   366→                self.sink.add({"t": int(time.time() * 1000), "kind": "meta",
+   367→   367→                               "event": "camera-capture-error", "sourceId": cam_id, "error": str(exc)})
+   368→   368→            finally:
+   369→   369→                try:
+   370→   370→                    cap.release()
+   371→   371→                except Exception:  # noqa: BLE001
+   372→   372→                    pass
+   373→   373→
+   374→   374→    def _capture_mic(self, mic_ids: List[str]) -> None:
+   375→   375→        if not mic_ids:
+   376→   376→            return
+   377→   377→        try:
+   378→   378→            import numpy as np  # type: ignore
+   379→   379→            import sounddevice as sd  # type: ignore
+   380→   380→        except Exception as exc:  # noqa: BLE001
+   381→   381→            self.sink.add({"t": int(time.time() * 1000), "kind": "meta",
+   382→   382→                           "event": "mic-unavailable", "error": str(exc)})
+   383→   383→            return
+   384→   384→        interval = 1.0 / MIC_RECORD_HZ
+   385→   385→        for mic_id in mic_ids:
+   386→   386→            try:
+   387→   387→                dev_idx: Optional[int] = None
+   388→   388→                if str(mic_id).startswith("mic:"):
+   389→   389→                    try:
+   390→   390→                        dev_idx = int(str(mic_id).split(":", 1)[1])
+   391→   391→                    except ValueError:
+   392→   392→                        dev_idx = None
+   393→   393→                latest = {"rms": 0.0}
+   394→   394→
+   395→   395→                def cb(indata: Any, frames: int, time_info: Any, status: Any) -> None:
+   396→   396→                    try:
+   397→   397→                        mono = indata[:, 0].astype("float32")
+   398→   398→                        latest["rms"] = min(1.0, max(0.0, float(np.sqrt(np.mean(np.square(mono)))) * 4.0))
+   399→   399→                    except Exception:  # noqa: BLE001
+   400→   400→                        pass
+   401→   401→
+   402→   402→                with sd.InputStream(samplerate=16000, channels=1, dtype="float32",
+   403→   403→                                    device=dev_idx, blocksize=1024, callback=cb):
+   404→   404→                    next_t = time.monotonic()
+   405→   405→                    while not self._cancel.is_set() and not self.global_stop.is_set() and self.state == "recording":
+   406→   406→                        self.sink.add({"t": int(time.time() * 1000), "kind": "mic",
+   407→   407→                                       "sourceId": mic_id, "level": round(latest["rms"], 4)})
+   408→   408→                        next_t += interval
+   409→   409→                        sleep = next_t - time.monotonic()
+   410→   410→                        if sleep > 0:
+   411→   411→                            time.sleep(sleep)
+   412→   412→                        else:
+   413→   413→                            next_t = time.monotonic()
+   414→   414→            except Exception as exc:  # noqa: BLE001
+   415→   415→                self.sink.add({"t": int(time.time() * 1000), "kind": "meta",
+   416→   416→                               "event": "mic-capture-error", "sourceId": mic_id, "error": str(exc)})
+   417→   417→
+   418→   418→    # ------------------------------------------------------------ encryption
+   419→   419→
+   420→   420→    def _write_header(self, fh: io.BufferedWriter, sources: List[str]) -> None:
+   421→   421→        header = {
+   422→   422→            "magic": MAGIC, "cipher": CIPHER, "kdf": KDF,
+   423→   423→            "iterations": KDF_ITERATIONS, "salt": base64.b64encode(self.salt).decode("ascii"),
+   424→   424→            "agentId": self.agent_id, "recordingId": self.recording_id,
+   425→   425→            "label": self.spec.get("label"),
+   426→   426→            "durationSec": self.duration_sec, "sources": sources,
+   427→   427→            "startedAt": self.started_at_ms,
+   428→   428→        }
+   429→   429→        fh.write((json.dumps(header, separators=(",", ":")) + "\n").encode("ascii"))
+   430→   430→
+   431→   431→    def _encrypt_group(self, key: bytes, aad: bytes, plaintext: bytes) -> bytes:
+   432→   432→        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+   433→   433→
+   434→   434→        nonce = os.urandom(12)
+   435→   435→        sealed = AESGCM(key).encrypt(nonce, plaintext, aad)  # ct || tag
+   436→   436→        ct, tag = sealed[:-16], sealed[-16:]
+   437→   437→        frame = len(nonce) + len(ct) + len(tag)
+   438→   438→        return frame.to_bytes(4, "big") + nonce + ct + tag
+   439→   439→
+   440→   440→    # ------------------------------------------------------------------- run
+   441→   441→
+   442→   442→    def run(self) -> None:
+   443→   443→        try:
+   444→   444→            self._run_inner()
+   445→   445→        except Exception as exc:  # noqa: BLE001 - never let a job kill the process
+   446→   446→            self.state = "failed"
+   447→   447→            self.error = str(exc)
+   448→   448→            log.exception("recording %s failed", self.recording_id)
+   449→   449→            try:
+   450→   450→                self.emit_status(self.status_msg())
+   451→   451→            except Exception:  # noqa: BLE001
+   452→   452→                pass
+   453→   453→            try:
+   454→   454→                self.transparency.recording_stop(self.spec.get("label"), "failed")
+   455→   455→            except Exception:  # noqa: BLE001
+   456→   456→                pass
+   457→   457→
+   458→   458→    def _run_inner(self) -> None:
+   459→   459→        from .captures import enumerate_captures
+   460→   460→
+   461→   461→        caps = enumerate_captures()
+   462→   462→        monitor_ids = self._default_monitors(caps)
+   463→   463→        camera_ids = self._selected("cameras")
+   464→   464→        mic_ids = self._selected("mics")
+   465→   465→        sources = monitor_ids + camera_ids + mic_ids
+   466→   466→
+   467→   467→        passphrase = str(self.spec.get("passphrase") or "")
+   468→   468→        if not passphrase:
+   469→   469→            raise ValueError("record:schedule payload is missing 'passphrase'")
+   470→   470→
+   471→   471→        # armed: MANDATORY user notification BEFORE any capture starts
+   472→   472→        try:
+   473→   473→            self.transparency.notifier.recording_armed(
+   474→   474→                self.spec.get("label") or "recording", self.duration_sec,
+   475→   475→                str(self.spec["noticeText"]) if self.spec.get("noticeText") else None,
+   476→   476→            )
+   477→   477→            self.transparency.remote_action(
+   478→   478→                "record", f"Recording session scheduled ({self.duration_sec}s)"
+   479→   479→                + (f" — {self.spec.get('label')}" if self.spec.get("label") else ""),
+   480→   480→            )
+   481→   481→        except Exception:  # noqa: BLE001 - transparency must never break recording
+   482→   482→            log.exception("transparency armed-notify failed")
+   483→   483→        self.emit_status(self.status_msg())  # state=armed
+   484→   484→        time.sleep(1.0)  # brief armed window so cancel() can land
+   485→   485→        if self._cancel.is_set():
+   486→   486→            self.state = "canceled"
+   487→   487→            self.ended_at_ms = int(time.time() * 1000)
+   488→   488→            self.emit_status(self.status_msg())
+   489→   489→            try:
+   490→   490→                self.transparency.recording_stop(self.spec.get("label"), "canceled")
+   491→   491→            except Exception:  # noqa: BLE001
+   492→   492→                pass
+   493→   493→            return
+   494→   494→
+   495→   495→        self.state = "recording"
+   496→   496→        self.started_at_ms = int(time.time() * 1000)
+   497→   497→        # MANDATORY on-screen overlay + red tray dot + toast (non-disableable)
+   498→   498→        try:
+   499→   499→            self.transparency.recording_start(
+   500→   500→                self.spec.get("label") or None,
+   501→   501→                str(self.spec["noticeText"]) if self.spec.get("noticeText") else None,
+   502→   502→            )
+   503→   503→        except Exception:  # noqa: BLE001
+   504→   504→            log.exception("transparency recording_start failed")
+   505→   505→
+   506→   506→        key = _derive_key(passphrase, self.salt)
+   507→   507→        del passphrase  # do not keep it around
+   508→   508→        aad = _aad_for(self.recording_id)
+   509→   509→
+   510→   510→        try:
+   511→   511→            fh = open(self.file_path, "wb")
+   512→   512→        except OSError as exc:
+   513→   513→            raise RuntimeError(f"cannot create recording file: {exc}") from exc
+   514→   514→
+   515→   515→        group: List[bytes] = []
+   516→   516→        group_size = 0
+   517→   517→        chunk_buf: List[bytes] = []
+   518→   518→        chunk_size = 0
+   519→   519→
+   520→   520→        def flush_group() -> None:
+   521→   521→            nonlocal group, group_size, chunk_buf, chunk_size
+   522→   522→            if not group:
+   523→   523→                return
+   524→   524→            plaintext = b"\n".join(group) + b"\n"
+   525→   525→            frame = self._encrypt_group(key, aad, plaintext)
+   526→   526→            fh.write(frame)
+   527→   527→            self.size_bytes += len(frame)
+   528→   528→            self.frames += len(group)
+   529→   529→            group = []
+   530→   530→            group_size = 0
+   531→   531→            chunk_buf.append(frame)
+   532→   532→            chunk_size += len(frame)
+   533→   533→            if chunk_size >= CHUNK_TARGET:
+   534→   534→                self._emit_chunk(chunk_buf)
+   535→   535→                chunk_buf = []
+   536→   536→                chunk_size = 0
+   537→   537→
+   538→   538→        # start capture threads (daemon — die with the process)
+   539→   539→        for target, args in (
+   540→   540→            (self._capture_screen, (monitor_ids,)),
+   541→   541→            (self._capture_camera, (camera_ids,)),
+   542→   542→            (self._capture_mic, (mic_ids,)),
+   543→   543→        ):
+   544→   544→            t = threading.Thread(target=target, args=args, daemon=True)
+   545→   545→            t.start()
+   546→   546→            self.capture_threads.append(t)
+   547→   547→
+   548→   548→        end_at = time.monotonic() + self.duration_sec
+   549→   549→        last_progress = time.monotonic()
+   550→   550→        try:
+   551→   551→            self._write_header(fh, sources)
+   552→   552→            self.size_bytes = fh.tell()
+   553→   553→            while True:
+   554→   554→                time.sleep(0.15)
+   555→   555→                records = self.sink.drain()
+   556→   556→                for rec in records:
+   557→   557→                    line = json.dumps(rec, separators=(",", ":")).encode("utf-8")
+   558→   558→                    group.append(line)
+   559→   559→                    group_size += len(line)
+   560→   560→                    if group_size >= GROUP_BYTES:
+   561→   561→                        flush_group()
+   562→   562→                now = time.monotonic()
+   563→   563→                if now - last_progress >= 15.0:
+   564→   564→                    last_progress = now
+   565→   565→                    self.emit_status(self.status_msg())
+   566→   566→                if self._cancel.is_set() or self.global_stop.is_set() or now >= end_at:
+   567→   567→                    break
+   568→   568→            flush_group()
+   569→   569→            if chunk_buf:
+   570→   570→                self._emit_chunk(chunk_buf)
+   571→   571→        finally:
+   572→   572→            try:
+   573→   573→                fh.flush()
+   574→   574→                os.fsync(fh.fileno())
+   575→   575→            except OSError:
+   576→   576→                pass
+   577→   577→            fh.close()
+   578→   578→
+   579→   579→        self.ended_at_ms = int(time.time() * 1000)
+   580→   580→        self.state = "canceled" if self._cancel.is_set() else "completed"
+   581→   581→        self.emit_status(self.status_msg())
+   582→   582→        try:
+   583→   583→            self.transparency.recording_stop(self.spec.get("label"), self.state)
+   584→   584→        except Exception:  # noqa: BLE001
+   585→   585→            log.exception("transparency recording_stop failed")
+   586→   586→
+   587→   587→        if self.state == "completed":
+   588→   588→            sha = self._sha256_file(self.file_path)
+   589→   589→            ok, _err = self.emit_manifest({
+   590→   590→                "recordingId": self.recording_id,
+   591→   591→                "fileName": os.path.basename(self.file_path),
+   592→   592→                "sizeBytes": self.size_bytes,
+   593→   593→                "sha256": sha,
+   594→   594→            })
+   595→   595→            log.info("recording %s completed: %s bytes, manifest ack=%s",
+   596→   596→                     self.recording_id, self.size_bytes, ok)
+   597→   597→
+   598→   598→    def _emit_chunk(self, frames: List[bytes]) -> None:
+   599→   599→        payload = b"".join(frames)
+   600→   600→        self.seq += 1
+   601→   601→        if len(payload) > CHUNK_MAX:
+   602→   602→            # contract cap violated (single huge frame) — split is impossible in
+   603→   603→            # this format, so log loudly; _fit_jpeg_b64_bgra prevents this path.
+   604→   604→            log.error("chunk %s seq=%d exceeds %dKB (%d) — dropping", self.recording_id,
+   605→   605→                      self.seq, CHUNK_MAX // 1024, len(payload))
+   606→   606→            return
+   607→   607→        self.uploader.submit(self.recording_id, self.seq, payload)
+   608→   608→
+   609→   609→    @staticmethod
+   610→   610→    def _sha256_file(path: str) -> str:
+   611→   611→        h = hashlib.sha256()
+   612→   612→        with open(path, "rb") as fh:
+   613→   613→            for block in iter(lambda: fh.read(65536), b""):
+   614→   614→                h.update(block)
+   615→   615→        return h.hexdigest()
+   616→   616→
+   617→   617→
+   618→   618→class RecordingManager:
+   619→   619→    """Handles record:schedule / record:cancel / record:status for the hub."""
+   620→   620→
+   621→   621→    def __init__(self, agent_id: str, cfg: Dict[str, Any], recordings_dir: str,
+   622→   622→                 transparency: Any, is_connected: Callable[[], bool],
+   623→   623→                 emit_chunk: Callable[[str, Dict[str, Any]], Tuple[bool, str]],
+   624→   624→                 emit_status: Callable[[Dict[str, Any]], None],
+   625→   625→                 emit_manifest: Callable[[Dict[str, Any]], Tuple[bool, str]]) -> None:
+   626→   626→        self.agent_id = agent_id
+   627→   627→        self.cfg = cfg
+   628→   628→        self.recordings_dir = recordings_dir
+   629→   629→        self.transparency = transparency
+   630→   630→        self.uploader = _ChunkUploader(recordings_dir, is_connected, emit_chunk, emit_status)
+   631→   631→        self.jobs: Dict[str, RecordingJob] = {}
+   632→   632→        self._lock = threading.Lock()
+   633→   633→        self._stop = threading.Event()
+   634→   634→        self.emit_status_fn = emit_status
+   635→   635→        self.emit_manifest_fn = emit_manifest
+   636→   636→
+   637→   637→    # ------------------------------------------------------------- handlers
+   638→   638→
+   639→   639→    def schedule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+   640→   640→        """Validate + accept a record:schedule. Raises ValueError on bad input."""
+   641→   641→        recording_id = str(payload.get("recordingId") or "").strip()
+   642→   642→        if not recording_id:
+   643→   643→            raise ValueError("recordingId is required")
+   644→   644→        duration_sec = int(payload.get("durationSec") or 0)
+   645→   645→        max_sec = int(self.cfg.get("maxRecordingMin", 60)) * 60
+   646→   646→        if duration_sec <= 0:
+   647→   647→            raise ValueError("durationSec must be positive")
+   648→   648→        if duration_sec > max_sec:
+   649→   649→            raise ValueError(
+   650→   650→                f"durationSec {duration_sec} exceeds this agent's maxRecordingMin cap "
+   651→   651→                f"({max_sec}s) — adjust maxRecordingMin in config.json"
+   652→   652→            )
+   653→   653→        usage = shutil.disk_usage(self.recordings_dir)
+   654→   654→        free_mb = int(usage.free / (1024 * 1024))
+   655→   655→        if free_mb < int(self.cfg.get("minFreeMB", 500)):
+   656→   656→            raise ValueError(
+   657→   657→                f"insufficient disk space for recording ({free_mb}MB free < "
+   658→   658→                f"minFreeMB {self.cfg.get('minFreeMB')}MB)"
+   659→   659→            )
+   660→   660→        with self._lock:
+   661→   661→            alive = [j for j in self.jobs.values() if j.is_alive()]
+   662→   662→            if len(alive) >= MAX_CONCURRENT:
+   663→   663→                raise ValueError(f"agent already has {len(alive)} recordings in progress (cap {MAX_CONCURRENT})")
+   664→   664→
+   665→   665→        job = RecordingJob(
+   666→   666→            dict(payload), self.agent_id, self.recordings_dir, self.uploader,
+   667→   667→            self.emit_status_fn, self.emit_manifest_fn,
+   668→   668→            self.transparency, self._stop,
+   669→   669→        )
+   670→   670→        with self._lock:
+   671→   671→            self.jobs[recording_id] = job
+   672→   672→        job.start()
+   673→   673→        return {"accepted": True, "state": job.state}
+   674→   674→
+   675→   675→    def cancel(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+   676→   676→        recording_id = str(payload.get("recordingId") or "")
+   677→   677→        with self._lock:
+   678→   678→            job = self.jobs.get(recording_id)
+   679→   679→        if job is None:
+   680→   680→            raise ValueError(f"unknown recordingId '{recording_id}'")
+   681→   681→        job.cancel()
+   682→   682→        return {"ok": True}
+   683→   683→
+   684→   684→    def status(self) -> Dict[str, Any]:
+   685→   685→        with self._lock:
+   686→   686→            jobs = [j for j in self.jobs.values() if j.is_alive() or j.state in ("armed", "recording")]
+   687→   687→        return {"recordings": [j.status_msg() for j in jobs]}
+   688→   688→
+   689→   689→    # ------------------------------------------------------------------ misc
+   690→   690→
+   691→   691→    def on_reconnect(self) -> None:
+   692→   692→        """Flush spooled chunks after the hub link comes back."""
+   693→   693→        try:
+   694→   694→            sent = self.uploader.flush_spool()
+   695→   695→            if sent:
+   696→   696→                log.info("flushed %d spooled recording chunk(s) after reconnect", sent)
+   697→   697→        except Exception:  # noqa: BLE001
+   698→   698→            log.exception("spool flush failed")
+   699→   699→
+   700→   700→    def stop_all(self) -> None:
+   701→   701→        self._stop.set()
+   702→   702→        with self._lock:
+   703→   703→            jobs = list(self.jobs.values())
+   704→   704→        for job in jobs:
+   705→   705→            job.cancel()
+   706→   706→        for job in jobs:
+   707→   707→            job.join(timeout=5.0)
+   708→   708→        self.uploader.stop()
+   709→   709→

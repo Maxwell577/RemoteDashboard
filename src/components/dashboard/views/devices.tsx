@@ -432,6 +432,32 @@ function DeviceDetailsBody({ device, close }: { device: Device; close: () => voi
           <DetailRow label="Cores" value={device.cpuCores} />
           <DetailRow label="Memory" value={ramLabel(device.totalMemoryMB)} />
           <DetailRow label="MAC" value={device.macAddress} mono />
+          <DetailRow
+            label="Captures"
+            value={
+              device.captures ? (
+                <span
+                  title={
+                    [
+                      `monitors: ${device.captures.monitors.map((m) => m.name).join(', ') || 'none'}`,
+                      `cameras: ${device.captures.cameras.map((c) => c.name).join(', ') || 'none'}`,
+                      `mics: ${device.captures.mics.map((m) => m.name).join(', ') || 'none'}`,
+                      `shells: ${device.captures.shells.join(', ') || 'none'}`,
+                    ].join('\n')
+                  }
+                >
+                  {device.captures.monitors.length} mon ·{' '}
+                  {device.captures.cameras.length} cam ·{' '}
+                  {device.captures.mics.length} mic ·{' '}
+                  {device.captures.shells.join('/') || '—'}
+                </span>
+              ) : (
+                <span className="text-muted-foreground" title="agent did not report capture sources (legacy agent)">
+                  —
+                </span>
+              )
+            }
+          />
         </DetailSection>
       </div>
 
